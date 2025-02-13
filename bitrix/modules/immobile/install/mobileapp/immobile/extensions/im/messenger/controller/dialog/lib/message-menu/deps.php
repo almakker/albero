@@ -1,0 +1,36 @@
+<?php
+
+return [
+	'extensions' => [
+		'apptheme',
+		'loc',
+		'type',
+		'haptics',
+		'notify-manager',
+		'utils/url',
+		'im:lib/theme',
+		'im:messenger/assets/common',
+		'im:messenger/const',
+		'im:messenger/controller/user-profile',
+		'im:messenger/controller/forward-selector',
+		'im:messenger/lib/params',
+		'im:messenger/lib/converter',
+		'im:messenger/lib/logger',
+		'im:messenger/lib/feature',
+		'im:messenger/lib/permission-manager',
+		'im:messenger/lib/helper',
+		'im:messenger/lib/ui/notification',
+		'im:messenger/controller/dialog/lib/message-create-menu',
+		'im:messenger/controller/dialog/lib/helper/text',
+		'layout/ui/feedback-form-opener',
+	],
+	'bundle' => [
+		'./src/action',
+		'./src/action-type',
+		'./src/icons',
+		'./src/menu',
+		'./src/message',
+		'./src/reaction',
+		'./src/view',
+	],
+];

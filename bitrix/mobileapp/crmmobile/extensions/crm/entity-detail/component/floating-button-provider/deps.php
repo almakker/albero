@@ -1,0 +1,16 @@
+<?php
+
+return [
+	'extensions' => [
+		'analytics',
+		'loc',
+		'layout/ui/plan-restriction',
+		'layout/ui/context-menu/item',
+		'layout/ui/detail-card/floating-button/menu/item',
+		'utils/object',
+		'require-lazy',
+
+		'crm:timeline/scheduler/providers/document',
+		'crm:entity-actions/conversion',
+	],
+];

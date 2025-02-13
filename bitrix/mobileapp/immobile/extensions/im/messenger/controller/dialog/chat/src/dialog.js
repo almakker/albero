@@ -1,0 +1,3619 @@
+/* eslint-disable es/no-nullish-coalescing-operators */
+/* eslint-disable es/no-optional-chaining */
+
+/**
+ * @module im/messenger/controller/dialog/chat/dialog
+ */
+jn.define('im/messenger/controller/dialog/chat/dialog', (require, exports, module) => {
+	/* global include */
+	/* region external import */
+
+	/* region native import */
+	include('InAppNotifier');
+
+	/* endregion native import */
+
+	/* region mobile import */
+	const AppTheme = require('apptheme');
+	const { Type } = require('type');
+	const { Loc } = require('loc');
+	const { Haptics } = require('haptics');
+	const { inAppUrl } = require('in-app-url');
+	const { clone } = require('utils/object');
+	const { Uuid } = require('utils/uuid');
+	const { throttle, debounce } = require('utils/function');
+	const { transparent } = require('utils/color');
+
+	/* endregion mobile import */
+
+	/* region immobile import */
+	const { serviceLocator, ServiceLocator } = require('im/messenger/lib/di/service-locator');
+
+	const {
+		EventType,
+		// FeatureFlag,
+		ReactionType,
+		FileType,
+		ErrorType,
+		ErrorCode,
+		SubTitleIconType,
+		DialogType,
+		UserRole,
+		OwnMessageStatus,
+		ComponentCode,
+		Setting,
+		Analytics,
+		MessageStatus,
+	} = require('im/messenger/const');
+
+	const { defaultUserIcon, ReactionAssets } = require('im/messenger/assets/common');
+
+	const { RecentConverter, DialogConverter } = require('im/messenger/lib/converter');
+	const { Counters } = require('im/messenger/lib/counters');
+	const { DateFormatter } = require('im/messenger/lib/date-formatter');
+	const { MessengerEmitter } = require('im/messenger/lib/emitter');
+	const {
+		DialogHelper,
+		Url,
+	} = require('im/messenger/lib/helper');
+	const { MessengerParams } = require('im/messenger/lib/params');
+	const { ObjectUtils } = require('im/messenger/lib/utils');
+	const { Feature } = require('im/messenger/lib/feature');
+	const { Calls } = require('im/messenger/lib/integration/immobile/calls');
+	const { ChatPermission } = require('im/messenger/lib/permission-manager');
+
+	const {
+		StatusField,
+		CheckInMessageHandler,
+	} = require('im/messenger/lib/element');
+	const { LoggerManager, Logger } = require('im/messenger/lib/logger');
+	const { MessageRest, DialogRest	} = require('im/messenger/provider/rest');
+	const { ChatService, MessageService, DiskService } = require('im/messenger/provider/service');
+
+	const { UserProfile } = require('im/messenger/controller/user-profile');
+	const { FileDownloadMenu } = require('im/messenger/controller/file-download-menu');
+	const { ReactionViewerController } = require('im/messenger/controller/reaction-viewer');
+
+	const {
+		DialogView,
+		AfterScrollMessagePosition,
+	} = require('im/messenger/view/dialog');
+
+	/* endregion immobile import */
+	/* endregion external import */
+
+	/* region lib import */
+	const { MentionManager } = require('im/messenger/controller/dialog/lib/mention');
+	const { DraftManager } = require('im/messenger/controller/dialog/lib/draft-manager');
+	const { HeaderButtons, HeaderTitle } = require('im/messenger/controller/dialog/lib/header');
+	const { ReplyManager } = require('im/messenger/controller/dialog/lib/reply-manager');
+	const { ScrollManager } = require('im/messenger/controller/dialog/lib/scroll-manager');
+	const { ContextManager } = require('im/messenger/controller/dialog/lib/context-manager');
+	const { MessageRenderer } = require('im/messenger/controller/dialog/lib/message-renderer');
+	const { AudioMessagePlayer } = require('im/messenger/controller/dialog/lib/audio-player');
+	const { MessageAvatarMenu } = require('im/messenger/controller/dialog/lib/message-avatar-menu');
+	const { WebDialog } = require('im/messenger/controller/dialog/lib/web');
+	const { MessageMenu } = require('im/messenger/controller/dialog/lib/message-menu');
+	const { PinManager } = require('im/messenger/controller/dialog/lib/pin');
+	const { PullWatchManager } = require('im/messenger/controller/dialog/lib/pull-watch-manager');
+	const { CommentButton } = require('im/messenger/controller/dialog/lib/comment-button');
+	const { DialogEmitter } = require('im/messenger/controller/dialog/lib/emitter');
+	const { DialogTextHelper } = require('im/messenger/controller/dialog/lib/helper/text');
+
+	/* endregion lib import */
+
+	/* region internal import */
+	const { AnalyticsEvent } = require('analytics');
+	/* endregion internal import */
+
+	const logger = LoggerManager.getInstance().getLogger('dialog--dialog');
+
+	/**
+	 * @class Dialog
+	 */
+	class Dialog
+	{
+		constructor()
+		{
+			/**
+			 * @protected
+			 * @type {MessengerCoreStore}
+			 */
+			this.store = serviceLocator.get('core').getStore();
+			/**
+			 * @protected
+			 * @type {MessengerCoreStoreManager}
+			 */
+			this.storeManager = serviceLocator.get('core').getStoreManager();
+			/**
+			 * @protected
+			 * @type {DialogId}
+			 */
+			this.dialogId = 0;
+
+			/**
+			 *
+			 * @type {DialogLocator}
+			 */
+			this.locator = new ServiceLocator();
+
+			/**
+			 * @private
+			 * @type {DialogRepository}
+			 */
+			this.dialogRepository = serviceLocator.get('core').getRepository().dialog;
+
+			/**
+			 * @private
+			 * @type {MessageRepository}
+			 */
+			this.messageRepository = serviceLocator.get('core').getRepository().message;
+
+			/**
+			 * @private
+			 * @type {DialogHeaderTitleParams}
+			 */
+			this.titleParams = null;
+			/**
+			 * @private
+			 * @type {ChatService}
+			 */
+			this.chatService = new ChatService(this.locator);
+			/**
+			 * @private
+			 * @type {DiskService}
+			 */
+			this.diskService = new DiskService();
+			/**
+			 * @protected
+			 * @type {MessageService}
+			 */
+			this.messageService = null;
+			/**
+			 * @private
+			 * @type {MessageRenderer}
+			 */
+			this.messageRenderer = null;
+			/**
+			 * @private
+			 * @type {HeaderTitle}
+			 */
+			this.headerTitle = null;
+			/**
+			 * @private
+			 * @type {HeaderButtons}
+			 */
+			this.headerButtons = null;
+			/**
+			 * @private
+			 * @type {ScrollManager}
+			 */
+			this.scrollManager = null;
+			/**
+			 * @private
+			 * @type {DraftManager}
+			 */
+			this.draftManager = null;
+			/**
+			 * @protected
+			 * @type {MentionManager}
+			 */
+			this.mentionManager = null;
+
+			/**
+			 * @protected
+			 * @type {PinManager}
+			 */
+			this.pinManager = null;
+
+			/**
+			 * @protected
+			 * @type {CheckInMessageHandler}
+			 */
+			this.checkInMessageHandler = null;
+
+			// eslint-disable-next-line no-undef
+			this.emitter = new DialogEmitter();
+			/**
+			 * @desc Id timer timeout for canceling request rest
+			 * @private
+			 * @type {number|null}
+			 */
+			this.holdWritingTimerId = null;
+			/**
+			 * @desc This hold for start request to rest method 'im.dialog.writing'
+			 * @constant
+			 * @private
+			 * @type {number}
+			 */
+			this.HOLD_WRITING_REST = 3000;
+			/**
+			 * @private
+			 * @type {AudioMessagePlayer}
+			 */
+			this.audioMessagePlayer = new AudioMessagePlayer(this.store);
+
+			this.pullWatchManager = null;
+
+			/**
+			 * @protected
+			 * @type {number|string|null}
+			 */
+			this.contextMessageId = null;
+			/**
+			 * @protected
+			 * @type {boolean}
+			 */
+			this.withMessageHighlight = false;
+
+			/**
+			 * @private
+			 * @type {boolean}
+			 */
+			this.needScrollToBottom = false;
+
+			this.firstDbPagePromise = null;
+
+			this.chatType = null;
+
+			this.bindMethods();
+			this.dialogDeleteHandler = () => {};
+
+			this.startWriting = throttle(this.startWriting, 5000, this);
+			this.startRecordVoiceMessage = throttle(this.startRecordVoiceMessage, 3000, this);
+			this.joinUserChat = throttle(this.joinUserChat, 5000, this);
+
+			this.locator
+				.add('chat-service', this.chatService)
+				.add('disk-service', this.diskService)
+				.add('store', this.store)
+				.add('emitter', this.emitter)
+			;
+
+			this.subscribeInternalEvents();
+		}
+
+		get isOpenInContext()
+		{
+			return !Type.isNull(this.contextMessageId);
+		}
+
+		bindMethods()
+		{
+			/** @private */
+			this.closeDialogHandler = this.onDialogClose.bind(this);
+			/** @private */
+			this.submitHandler = this.sendMessage.bind(this);
+			/** @private */
+			this.changeTextHandler = this.onChangeText.bind(this);
+			/** @private */
+			this.attachTapHandler = this.onAttachTap.bind(this);
+			/** @private */
+			this.resendHandler = this.resendMessage.bind(this);
+			/** @private */
+			this.loadTopPageHandler = this.loadTopPage.bind(this);
+			/** @private */
+			this.loadBottomPageHandler = this.loadBottomPage.bind(this);
+			/** @private */
+			this.scrollBeginHandler = this.onScrollBegin.bind(this);
+			/** @private */
+			this.scrollEndHandler = this.onScrollEnd.bind(this);
+			this.replyHandler = this.onReply.bind(this);
+			/** @private */
+			this.readyToReplyHandler = this.onReadyToReply.bind(this);
+			/** @private */
+			this.quoteTapHandler = this.onQuoteTap.bind(this);
+			/** @private */
+			this.cancelReplyHandler = this.onCancelReply.bind(this);
+			/** @private */
+			this.visibleMessagesChangedHandler = this.onVisibleMessagesChanged.bind(this);
+			/** @private */
+			this.messageReadHandler = this.onReadMessage.bind(this);
+			/** @private */
+			this.scrollToNewMessagesHandler = this.onScrollToNewMessages.bind(this);
+			/** @private */
+			this.playbackCompletedHandler = this.onPlaybackCompleted.bind(this);
+			/** @private */
+			this.urlTapHandler = this.onUrlTap.bind(this);
+			/** @private */
+			this.audioRecordingStartHandler = this.onAudioRecordingStart.bind(this);
+			/** @private */
+			this.audioRecordingFinishHandler = this.onAudioRecordingFinish.bind(this);
+			/** @private */
+			this.submitAudioHandler = this.sendAudio.bind(this);
+			/** @private */
+			this.mentionTapHandler = this.onMentionTap.bind(this);
+			/** @protected */
+			this.statusFieldTapHandler = this.onStatusFieldTap.bind(this);
+			/** @private */
+			this.chatJoinButtonTapHandler = this.onChatJoinButtonTapHandler.bind(this);
+			/** @private */
+			this.messageAvatarTapHandler = this.onMessageAvatarTap.bind(this);
+			/** @private */
+			this.messageAvatarLongTapHandler = this.onMessageAvatarLongTap.bind(this);
+			/** @private */
+			this.messageQuoteTapHandler = this.onMessageQuoteTap.bind(this);
+			/** @private */
+			// this.messageLongTapHandler = this.onMessageLongTap.bind(this);
+			/** @private */
+			this.messageDoubleTapHandler = this.onMessageDoubleTap.bind(this);
+			/** @private */
+			// this.messageMenuReactionTapHandler = this.setReaction.bind(this);
+			// this.messageMenuActionTapHandler = this.onMessageMenuAction.bind(this);
+			/** @private */
+			this.messageFileDownloadTapHandler = this.onMessageFileDownloadTap.bind(this);
+			/** @private */
+			this.messageFileUploadCancelTapHandler = this.onMessageFileUploadCancelTap.bind(this);
+			/** @private */
+			this.reactionTapHandler = debounce(this.setReaction.bind(this), 300);
+			/** @private */
+			this.imageTapHandler = this.onImageTap.bind(this);
+			/** @private */
+			this.audioTapHandler = this.onAudioTap.bind(this);
+			/** @private */
+			this.audioRateTapHandler = this.onAudioRateTap.bind(this);
+			/** @private */
+			this.videoTapHandler = this.onVideoTap.bind(this);
+			/** @private */
+			this.fileTapHandler = this.onFileTap.bind(this);
+			/** @private */
+			this.forwardTapHandler = this.onForwardTap.bind(this);
+			/** @private */
+			this.phoneTapHandler = this.onPhoneTap.bind(this);
+			/** @private */
+			this.richPreviewTapHandler = this.onRichPreviewTap.bind(this);
+			/** @private */
+			this.richNameTapHandler = this.onRichNameTap.bind(this);
+			/** @private */
+			this.richCancelTapHandler = this.onRichCancelTap.bind(this);
+
+			this.channelCommentTapHandler = this.onChannelCommentTap.bind(this);
+			/**
+			 * @private
+			 * @deprecated
+			 */
+			this.onLikeHandler = debounce(this.onLike.bind(this), 300);
+			/** @private */
+			this.reactionLongTapHandler = this.openReactionViewer.bind(this);
+			/** @private */
+			this.closeHandler = this.onClose.bind(this);
+			/** @private */
+			this.hiddenHandler = this.onHidden.bind(this);
+			/** @private */
+			this.showHandler = this.onShow.bind(this);
+			/** @private */
+			this.setChatCollectionHandler = this.drawMessageList.bind(this);
+			/** @private */
+			this.messageUpdateHandler = this.messageUpdateHandlerRouter.bind(this);
+			this.updateReactionHandler = this.redrawReactionMessages.bind(this);
+			this.deleteHandler = this.deleteMessage.bind(this);
+			/** @private */
+			this.dialogUpdateHandlerRouter = this.dialogUpdateHandlerRouter.bind(this);
+			/** @private */
+			this.applicationStatusHandler = this.applicationStatusHandler.bind(this);
+			/** @private */
+			this.updateMessageCounterHandler = this.updateMessageCounter.bind(this);
+			/** @private */
+			this.redrawReactionMessageHandler = this.redrawReactionMessage.bind(this);
+
+			this.updateCommentRouter = this.updateCommentRouter.bind(this);
+			this.deleteChannelCountersHandler = this.deleteChannelCountersHandler.bind(this);
+
+			this.beforeFirstPageRenderFromServerHandler = this.onBeforeFirstPageRenderFromServer.bind(this);
+		}
+
+		/** @protected */
+		subscribeViewEvents()
+		{
+			this.view
+				.on(EventType.dialog.attachTap, this.attachTapHandler)
+				.on(EventType.dialog.resend, this.resendHandler)
+				.on(EventType.dialog.loadTopPage, this.loadTopPageHandler)
+				.on(EventType.dialog.loadBottomPage, this.loadBottomPageHandler)
+				.on(EventType.dialog.scrollBegin, this.scrollBeginHandler)
+				.on(EventType.dialog.scrollEnd, this.scrollEndHandler)
+				.on(EventType.dialog.reply, this.replyHandler)
+				.on(EventType.dialog.readyToReply, this.readyToReplyHandler)
+				.on(EventType.dialog.visibleMessagesChanged, this.visibleMessagesChangedHandler)
+				.on(EventType.dialog.messageRead, this.messageReadHandler)
+				.on(EventType.dialog.scrollToNewMessages, this.scrollToNewMessagesHandler)
+				.on(EventType.dialog.playbackCompleted, this.playbackCompletedHandler)
+				.on(EventType.dialog.urlTap, this.urlTapHandler)
+				.on(EventType.dialog.statusFieldTap, this.statusFieldTapHandler)
+				.on(EventType.dialog.chatJoinButtonTap, this.chatJoinButtonTapHandler)
+				.on(EventType.dialog.audioRecordingStart, this.audioRecordingStartHandler)
+				.on(EventType.dialog.audioRecordingFinish, this.audioRecordingFinishHandler)
+				.on(EventType.dialog.submitAudio, this.submitAudioHandler)
+				.on(EventType.dialog.mentionTap, this.mentionTapHandler)
+				.on(EventType.dialog.messageAvatarTap, this.messageAvatarTapHandler)
+				.on(EventType.dialog.messageAvatarLongTap, this.messageAvatarLongTapHandler)
+				.on(EventType.dialog.messageQuoteTap, this.messageQuoteTapHandler)
+				.on(EventType.dialog.messageDoubleTap, this.messageDoubleTapHandler)
+				.on(EventType.dialog.messageFileDownloadTap, this.messageFileDownloadTapHandler)
+				.on(EventType.dialog.messageFileUploadCancelTap, this.messageFileUploadCancelTapHandler)
+				.on(EventType.dialog.reactionTap, this.reactionTapHandler)
+				.on(EventType.dialog.reactionLongTap, this.reactionLongTapHandler)
+				.on(EventType.view.barButtonTap, this.headerButtons.tapHandler)
+				.on(EventType.view.close, this.closeHandler)
+				.on(EventType.view.hidden, this.hiddenHandler)
+				.on(EventType.view.show, this.showHandler)
+				.on(EventType.dialog.like, this.onLikeHandler)
+				.on(EventType.dialog.audioTap, this.audioTapHandler)
+				.on(EventType.dialog.audioRateTap, this.audioRateTapHandler)
+				.on(EventType.dialog.imageTap, this.imageTapHandler)
+				.on(EventType.dialog.fileTap, this.fileTapHandler)
+				.on(EventType.dialog.phoneTap, this.phoneTapHandler)
+				.on(EventType.dialog.videoTap, this.videoTapHandler)
+				.on(EventType.dialog.forwardTap, this.forwardTapHandler)
+				.on(EventType.dialog.richNameTap, this.richNameTapHandler)
+				.on(EventType.dialog.richPreviewTap, this.richPreviewTapHandler)
+				.on(EventType.dialog.richCancelTap, this.richCancelTapHandler)
+				.on(EventType.dialog.channelCommentTap, this.channelCommentTapHandler)
+			;
+
+			this.view.textField.on(EventType.dialog.textField.submit, this.submitHandler);
+			this.view.textField.on(EventType.dialog.textField.quoteTap, this.quoteTapHandler);
+			this.view.textField.on(EventType.dialog.textField.changeText, this.changeTextHandler);
+			this.view.textField.on(EventType.dialog.textField.cancelQuote, this.cancelReplyHandler);
+
+			this.view.ui.on('titleClick', () => {
+				MessengerEmitter.emit(EventType.messenger.openSidebar, {
+					dialogId: this.dialogId,
+				});
+			});
+
+			this.messageMenuComponent.subscribeEvents();
+			this.pinManager?.subscribeViewEvents();
+			this.checkInMessageHandler?.subscribeEvents();
+		}
+
+		/** @private */
+		unsubscribeViewEvents()
+		{
+			this.mentionManager?.unsubscribeEvents();
+			this.checkInMessageHandler?.unsubscribeEvents();
+			this.view.removeAll();
+		}
+
+		/** @protected */
+		subscribeStoreEvents()
+		{
+			this.storeManager
+				.on('messagesModel/setChatCollection', this.setChatCollectionHandler)
+				.on('messagesModel/update', this.messageUpdateHandler)
+				.on('messagesModel/updateWithId', this.messageUpdateHandler)
+				.on('messagesModel/reactionsModel/set', this.updateReactionHandler)
+				.on('messagesModel/reactionsModel/updateWithId', this.redrawReactionMessageHandler)
+				.on('messagesModel/reactionsModel/add', this.redrawReactionMessageHandler)
+				.on('messagesModel/delete', this.deleteHandler)
+				.on('dialoguesModel/add', this.dialogUpdateHandlerRouter)
+				.on('dialoguesModel/update', this.dialogUpdateHandlerRouter)
+				.on('dialoguesModel/update', this.updateMessageCounterHandler)
+				.on('dialoguesModel/delete', this.dialogDeleteHandler)
+				.on('usersModel/set', this.dialogUpdateHandlerRouter)
+				.on('applicationModel/setStatus', this.applicationStatusHandler)
+				.on('commentModel/setComments', this.updateCommentRouter)
+				.on('commentModel/setCounters', this.updateCommentRouter)
+				.on('commentModel/setCommentsWithCounters', this.updateCommentRouter)
+				.on('commentModel/deleteChannelCounters', this.deleteChannelCountersHandler)
+			;
+
+			this.pinManager?.subscribeStoreEvents();
+		}
+
+		/** @protected */
+		unsubscribeStoreEvents()
+		{
+			this.storeManager
+				.off('messagesModel/setChatCollection', this.setChatCollectionHandler)
+				.off('messagesModel/update', this.messageUpdateHandler)
+				.off('messagesModel/updateWithId', this.messageUpdateHandler)
+				.off('messagesModel/reactionsModel/set', this.updateReactionHandler)
+				.off('messagesModel/reactionsModel/updateWithId', this.redrawReactionMessageHandler)
+				.off('messagesModel/reactionsModel/add', this.redrawReactionMessageHandler)
+				.off('messagesModel/delete', this.deleteHandler)
+				.off('dialoguesModel/add', this.dialogUpdateHandlerRouter)
+				.off('dialoguesModel/update', this.dialogUpdateHandlerRouter)
+				.off('dialoguesModel/update', this.updateMessageCounterHandler)
+				.off('dialoguesModel/delete', this.dialogDeleteHandler)
+				.off('usersModel/set', this.dialogUpdateHandlerRouter)
+				.off('applicationModel/setStatus', this.applicationStatusHandler)
+				.off('commentModel/setComments', this.updateCommentRouter)
+				.off('commentModel/setCounters', this.updateCommentRouter)
+				.off('commentModel/setCommentsWithCounters', this.updateCommentRouter)
+				.off('commentModel/deleteChannelCounters', this.deleteChannelCountersHandler)
+			;
+
+			this.pinManager?.unsubscribeStoreEvents();
+		}
+
+		subscribeInternalEvents()
+		{
+			this.emitter.on('beforeFirstPageRenderFromServer', this.beforeFirstPageRenderFromServerHandler);
+		}
+
+		unsubscribeInternalEvents()
+		{
+			this.emitter.off('beforeFirstPageRenderFromServer', this.beforeFirstPageRenderFromServerHandler);
+		}
+
+		/** @private */
+		subscribeExternalEvents()
+		{
+			this.scrollManager.subscribeEvents();
+			BX.addCustomEvent(EventType.dialog.external.close, this.closeDialogHandler);
+		}
+
+		/** @private */
+		unsubscribeExternalEvents()
+		{
+			this.scrollManager.unsubscribeEvents();
+			BX.removeCustomEvent(EventType.dialog.external.close, this.closeDialogHandler);
+		}
+
+		/** @protected */
+		initManagers()
+		{
+			/**
+			 * @private
+			 * @type {ScrollManager}
+			 */
+			this.scrollManager = new ScrollManager({
+				view: this.view,
+				dialogId: this.getDialogId(),
+			});
+
+			/**
+			 * @private
+			 * @type {ContextManager}
+			 */
+			this.contextManager = new ContextManager({
+				dialogId: this.getDialogId(),
+				dialogLocator: this.locator,
+			});
+
+			/**
+			 * @private
+			 * @type {ReplyManager}
+			 */
+			this.replyManager = new ReplyManager({
+				store: this.store,
+				dialogView: this.view,
+			});
+
+			/**
+			 * @private
+			 * @type {DraftManager}
+			 */
+			this.draftManager = new DraftManager({
+				store: this.store,
+				view: this.view,
+				dialogId: this.getDialogId(),
+				replyManager: this.replyManager,
+				initWithExternalForward: Boolean(this.forwardMessageId),
+			});
+			this.commentButton = new CommentButton(this.view, this.getDialogId(), this.locator);
+			this.pullWatchManager = new PullWatchManager(this.dialogId);
+			this.initMentionManager();
+
+			this.replyManager.setDraftManager(this.draftManager);
+			if (this.forwardMessageId)
+			{
+				this.replyManager.startForwardingMessage(this.forwardMessageId);
+			}
+
+			this.locator
+				.add('reply-manager', this.replyManager)
+				.add('mention-manager', this.mentionManager)
+			;
+		}
+
+		initMentionManager()
+		{
+			/**
+			 * @private
+			 * @type {MentionManager}
+			 */
+			this.mentionManager = new MentionManager({
+				view: this.view,
+				dialogId: this.getDialogId(),
+			});
+
+			this.replyManager.setDraftManager(this.draftManager);
+
+			this.locator
+				.add('context-manager', this.contextManager)
+				.add('reply-manager', this.replyManager)
+				.add('mention-manager', this.mentionManager)
+			;
+		}
+
+		initComponents()
+		{
+			this.messageMenuComponent = new MessageMenu({
+				serviceLocator: this.locator,
+				dialogId: this.getDialogId(),
+			});
+
+			this.checkInMessageHandler = new CheckInMessageHandler(serviceLocator, this.locator);
+		}
+
+		async open(options)
+		{
+			const {
+				dialogId,
+				messageId,
+				withMessageHighlight,
+				dialogTitleParams,
+				forwardMessageId,
+				chatType = DialogType.chat,
+				isNew = false,
+				isFromPush = false,
+			} = options;
+
+			this.dialogId = dialogId;
+			serviceLocator.add(this.getDialogId(), this);
+			this.contextMessageId = messageId ?? null;
+			this.withMessageHighlight = withMessageHighlight ?? false;
+			this.isNew = isNew;
+			this.isFromPush = isFromPush;
+
+			this.chatType = chatType;
+			await this.store.dispatch('applicationModel/openDialogId', dialogId);
+			await this.store.dispatch('recentModel/like', {
+				id: dialogId,
+				liked: false,
+			});
+
+			const isOpenlinesChat = dialogTitleParams && dialogTitleParams.chatType === 'lines';
+			if (
+				!Feature.isChatV2Enabled
+				|| isOpenlinesChat
+				|| this.isBot()
+			)
+			{
+				this.openWebDialog(options);
+
+				return;
+			}
+
+			if (forwardMessageId)
+			{
+				this.forwardMessageId = forwardMessageId;
+			}
+
+			this.pinManager = new PinManager({
+				dialogId: this.dialogId,
+				locator: this.locator,
+			});
+
+			const hasDialog = await this.loadDialogFromDb();
+			if (hasDialog)
+			{
+				this.messageService = new MessageService({
+					store: this.store,
+					chatId: this.getChatId(),
+				});
+
+				this.locator.add('message-service', this.messageService);
+			}
+
+			this.firstDbPagePromise = this.loadHistoryMessagesFromDb();
+
+			let titleParams = null;
+			if (dialogTitleParams)
+			{
+				titleParams = {
+					text: dialogTitleParams.name,
+					detailText: dialogTitleParams.description,
+					imageUrl: dialogTitleParams.avatar,
+					useLetterImage: true,
+				};
+
+				if (!dialogTitleParams.avatar || dialogTitleParams.avatar === '')
+				{
+					titleParams.imageColor = dialogTitleParams.color;
+				}
+			}
+
+			this.createWidget(titleParams);
+		}
+
+		onDialogClose({ dialogId })
+		{
+			if (String(this.getDialogId()) === String(dialogId))
+			{
+				this.view.back();
+
+				logger.info('Dialog.onDialogClose: ', dialogId, ' complete');
+			}
+		}
+
+		/**
+		 * @param {DialoguesModelState} dialog
+		 */
+		onBeforeFirstPageRenderFromServer(dialog)
+		{
+			logger.log('Dialog.beforeFirstPageRenderFromServer', dialog);
+
+			this.view.setMessageIdToScrollAfterSet(dialog.lastReadId);
+		}
+
+		openLine(options)
+		{
+			this.openWebDialog(options);
+		}
+
+		/**
+		 *
+		 * @return {DialogId}
+		 */
+		getDialogId()
+		{
+			return this.dialogId;
+		}
+
+		/**
+		 * @desc Return check is bot by current user dialog ( if is not group dialog )
+		 * @return {boolean}
+		 */
+		isBot()
+		{
+			let isBot = false;
+			const isGroupDialog = DialogHelper.isDialogId(this.dialogId);
+			if (!isGroupDialog)
+			{
+				const userModel = this.store.getters['usersModel/getById'](this.dialogId);
+				if (!Type.isUndefined(userModel))
+				{
+					isBot = userModel.bot;
+				}
+			}
+
+			return isBot;
+		}
+
+		/**
+		 * @return {DialoguesModelState|{}}
+		 */
+		getDialog()
+		{
+			const dialog = this.store.getters['dialoguesModel/getById'](this.dialogId);
+
+			return dialog || {};
+		}
+
+		/**
+		 * @param {String} [chatId=null]
+		 * @return {DialoguesModelState|{}}
+		 */
+		getDialogByChatId(chatId = null)
+		{
+			const dialog = this.store.getters['dialoguesModel/getByChatId'](chatId || this.getDialog()?.chatId);
+
+			return dialog || {};
+		}
+
+		/**
+		 * @desc check is canal
+		 * @return {boolean}
+		 */
+		isOpenChat()
+		{
+			return DialogHelper.createByDialogId(this.getDialogId())?.isOpenChat;
+		}
+
+		/**
+		 * @param {DialoguesModelState} [dialogData=this.getDialog()]
+		 * @return {DialoguesModelState|{}}
+		 */
+		isChannel(dialogData = this.getDialog())
+		{
+			return DialogHelper.createByModel(dialogData)?.isChannel;
+		}
+
+		/**
+		 * @param {DialoguesModelState} [dialogData=this.getDialog()]
+		 * @return {DialoguesModelState|{}}
+		 */
+		isComment(dialogData = this.getDialog())
+		{
+			return DialogHelper.createByModel(dialogData)?.isComment;
+		}
+
+		getDialogHelper()
+		{
+			return DialogHelper.createByDialogId(this.getDialogId());
+		}
+
+		isMuted()
+		{
+			const dialog = this.getDialog();
+
+			return dialog.muteList?.includes(MessengerParams.getUserId());
+		}
+
+		getChatId()
+		{
+			const dialog = this.store.getters['dialoguesModel/getById'](this.dialogId);
+			if (dialog && dialog.chatId && dialog.chatId > 0)
+			{
+				return dialog.chatId;
+			}
+
+			return 0;
+		}
+
+		/** @private */
+		getMessageReactionsLottie()
+		{
+			return {
+				[ReactionType.like]: ReactionAssets.getLottieUrl(ReactionType.like),
+				[ReactionType.kiss]: ReactionAssets.getLottieUrl(ReactionType.kiss),
+				[ReactionType.cry]: ReactionAssets.getLottieUrl(ReactionType.cry),
+				[ReactionType.laugh]: ReactionAssets.getLottieUrl(ReactionType.laugh),
+				[ReactionType.angry]: ReactionAssets.getLottieUrl(ReactionType.angry),
+				[ReactionType.facepalm]: ReactionAssets.getLottieUrl(ReactionType.facepalm),
+				[ReactionType.wonder]: ReactionAssets.getLottieUrl(ReactionType.wonder),
+			};
+		}
+
+		/** @private */
+		getMessageReactionsSvg()
+		{
+			return {
+				[ReactionType.like]: ReactionAssets.getSvgUrl(ReactionType.like),
+				[ReactionType.kiss]: ReactionAssets.getSvgUrl(ReactionType.kiss),
+				[ReactionType.cry]: ReactionAssets.getSvgUrl(ReactionType.cry),
+				[ReactionType.laugh]: ReactionAssets.getSvgUrl(ReactionType.laugh),
+				[ReactionType.angry]: ReactionAssets.getSvgUrl(ReactionType.angry),
+				[ReactionType.facepalm]: ReactionAssets.getSvgUrl(ReactionType.facepalm),
+				[ReactionType.wonder]: ReactionAssets.getSvgUrl(ReactionType.wonder),
+			};
+		}
+
+		/**
+		 * @private
+		 * @return {{imageUrl?: string, defaultIconSvg?: string}}
+		 */
+		getCurrentUserAvatarForReactions()
+		{
+			const currentUser = this.store.getters['usersModel/getById'](MessengerParams.getUserId());
+			if (!currentUser)
+			{
+				return {
+					defaultIconSvg: defaultUserIcon(),
+				};
+			}
+
+			if (currentUser && currentUser.avatar !== '')
+			{
+				return {
+					imageUrl: currentUser.avatar,
+				};
+			}
+
+			return {
+				defaultIconSvg: defaultUserIcon(currentUser.color),
+			};
+		}
+
+		getDialogType()
+		{
+			return 'messenger';
+		}
+
+		checkCanHaveAttachments()
+		{
+			return true;
+		}
+
+		/** @private */
+		createWidget(titleParams = null)
+		{
+			if (!titleParams)
+			{
+				titleParams = HeaderTitle.createTitleParams(this.getDialogId(), this.store);
+			}
+			this.headerButtons = new HeaderButtons({
+				store: this.store,
+				dialogId: this.getDialogId(),
+				locator: this.locator,
+			});
+
+			PageManager.openWidget(
+				'chat.dialog',
+				{
+					dialogId: this.getDialogId(),
+					titleParams,
+					rightButtons: this.headerButtons.getButtons(true),
+					reactions: {
+						lottie: this.getMessageReactionsLottie(),
+						svg: this.getMessageReactionsSvg(),
+						currentUserAvatar: this.getCurrentUserAvatarForReactions(),
+					},
+					autoplayVideo: Feature.isAutoplayVideoEnabled,
+					code: 'im.dialog',
+					dialogType: this.getDialogType(),
+					canHaveAttachments: this.checkCanHaveAttachments(),
+					pinPanel: this.pinManager?.getPinPanelParams(),
+				},
+			)
+				.then(this.onWidgetReady.bind(this))
+				.catch((error) => logger.error(error))
+			;
+		}
+
+		/**
+		 * @private
+		 * @param widget
+		 */
+		async onWidgetReady(widget)
+		{
+			this.createView(widget);
+			this.initManagers();
+			this.initComponents();
+			this.subscribeViewEvents();
+			this.subscribeStoreEvents();
+			this.subscribeExternalEvents();
+
+			if ((this.isComment()) && this.getChatId() > 0)
+			{
+				void await this.store.dispatch('messagesModel/clearChatCollection', { chatId: this.getChatId() });
+			}
+
+			const hasSavedMessages = await this.loadSavedMessages();
+			if (!hasSavedMessages)
+			{
+				this.renderRecentMessage();
+			}
+
+			this.loadChatWithMessages()
+				.then(() => this.handleLoadChatWithMessages())
+				.catch((error) => this.handleLoadChatWithMessagesError(error))
+			;
+		}
+
+		renderRecentMessage()
+		{
+			logger.info(`Dialog: dialogId: ${this.dialogId} first load`);
+
+			const recentMessage = DialogConverter.createMessageFromRecent(this.getDialogId());
+			if (
+				recentMessage
+				&& this.getDialog().type !== DialogType.copilot
+				// TODO delete fix after enable local storage in copilot component
+				&& this.isOpenInContext === false
+			)
+			{
+				this.view.ui.setMessages([recentMessage]);
+			}
+			else
+			{
+				this.view.showMessageListLoader();
+			}
+		}
+
+		async loadChatWithMessages()
+		{
+			if (this.contextMessageId)
+			{
+				try
+				{
+					await this.chatService.loadChatWithContext(this.dialogId, this.contextMessageId);
+
+					return true;
+				}
+				catch (error)
+				{
+					logger.error(`Dialog.loadChatWithMessages dialogId=${this.dialogId} contextMessageId=${this.contextMessageId} error`, error);
+
+					this.contextMessageId = null;
+					this.withMessageHighlight = false;
+					this.view.resetContextOptions();
+
+					return this.chatService.loadChatWithMessages(this.dialogId);
+				}
+			}
+
+			if (this.chatType === DialogType.comment)
+			{
+				return this.chatService.loadCommentChatWithMessages(this.dialogId);
+			}
+
+			return this.chatService.loadChatWithMessages(this.dialogId);
+		}
+
+		handleLoadChatWithMessages()
+		{
+			if (!Type.isArrayFilled(this.getModelMessages()))
+			{
+				this.view.showWelcomeScreen();
+			}
+			this.pullWatchManager.subscribe();
+
+			this.view.hideMessageListLoader();
+			this.setInputPlaceholder();
+			this.view.setReadingMessageId(this.getDialog().lastReadId);
+			this.messageService = new MessageService({
+				store: this.store,
+				chatId: this.getChatId(),
+			});
+
+			this.locator.add('message-service', this.messageService);
+
+			const counter = this.getDialog().counter;
+			if (counter > 0)
+			{
+				this.view.setNewMessageCounter(counter);
+			}
+
+			this.commentButton.init();
+			if (this.isComment())
+			{
+				this.pinManager.showDiscussionMessage(this.getDialog().parentMessageId);
+			}
+
+			if (this.isChannel())
+			{
+				this.view.setSendButtonColors({
+					enabled: AppTheme.colors.accentExtraAqua,
+					disabled: AppTheme.colors.accentExtraAqua,
+				});
+			}
+
+			this.headerTitle.renderTitle();
+			this.headerButtons.render(this.view);
+			this.drawStatusField();
+			this.resendMessages();
+			this.sendAnalyticsOpenDialog();
+		}
+
+		handleLoadChatWithMessagesError(loadChatError)
+		{
+			logger.error('Dialog.loadMessages error: ', loadChatError);
+
+			let errors = loadChatError;
+			if (!Type.isArray(loadChatError))
+			{
+				errors = [loadChatError];
+			}
+
+			for (const error of errors)
+			{
+				if (error.code === ErrorType.dialog.accessDenied)
+				{
+					MessengerEmitter.emit(
+						EventType.messenger.dialogAccessError,
+						{ dialogId: this.getDialogId() },
+						ComponentCode.imMessenger,
+					);
+					this.view.back();
+
+					return;
+				}
+			}
+
+			throw loadChatError;
+		}
+
+		async loadSavedMessages()
+		{
+			await this.firstDbPagePromise;
+
+			if (!Feature.isLocalStorageEnabled && !this.getDialog().inited)
+			{
+				return false;
+			}
+
+			const savedMessages = this.getModelMessages();
+			if (Type.isArrayFilled(savedMessages))
+			{
+				logger.info(`Dialog: dialogId: ${this.dialogId} rerender`);
+				await this.store.dispatch('messagesModel/forceUpdateByChatId', { chatId: this.getChatId() });
+				this.drawStatusField();
+
+				return true;
+			}
+
+			return false;
+		}
+
+		async loadChatWithMessagesFromServer()
+		{
+			if (this.chatType === DialogType.comment)
+			{
+				return this.chatService.loadCommentChatWithMessages(this.dialogId);
+			}
+
+			return this.chatService.loadChatWithMessages(this.dialogId);
+		}
+
+		getModelMessages()
+		{
+			if (this.getChatId() > 0)
+			{
+				return this.store.getters['messagesModel/getByChatId'](this.getChatId());
+			}
+
+			return [];
+		}
+
+		async loadDialogFromDb()
+		{
+			if (!Feature.isLocalStorageEnabled)
+			{
+				return false;
+			}
+
+			const dialog = await this.dialogRepository.getByDialogId(this.getDialogId());
+
+			logger.log('Dialog.loadDialogFromDb', dialog);
+			if (dialog)
+			{
+				await this.store.dispatch('dialoguesModel/setFromLocalDatabase', dialog);
+
+				return true;
+			}
+
+			return false;
+		}
+
+		async loadHistoryMessagesFromDb()
+		{
+			if (
+				!Feature.isLocalStorageEnabled
+				|| this.chatType === DialogType.comment
+			)
+			{
+				return;
+			}
+
+			if (this.isComment())
+			{
+				return;
+			}
+
+			if (this.isChannel() && this.getDialogHelper()?.isCurrentUserGuest)
+			{
+				return;
+			}
+
+			const chatId = this.getChatId();
+			if (!chatId)
+			{
+				logger.warn(`Dialog.loadHistoryMessagesFromDb: we don't have a chatId for dialog ${this.getDialogId()}`);
+
+				return;
+			}
+
+			const lastReadId = this.getDialog().lastReadId ?? 0;
+			const contextMessageId = this.contextMessageId ?? lastReadId;
+			logger.info('Dialog.loadHistoryMessagesFromDb lastReadId', lastReadId, 'contextMessageId', contextMessageId);
+			let result;
+			if (contextMessageId === 0)
+			{
+				result = await this.messageRepository.getTopPage({
+					chatId,
+					limit: 51,
+				});
+
+				logger.error(`
+					Dialog.loadHistoryMessagesFromDb
+					received the latest messages because where is no lastReadId for dialog ${this.getDialogId()}
+				`, this.getDialog(), result);
+			}
+			else
+			{
+				const context = await this.messageService.loadLocalStorageContext(contextMessageId);
+				result = context.result;
+
+				logger.info('Dialog.loadHistoryMessagesFromDb result by lastReadId', result);
+			}
+
+			if (Type.isArrayFilled(result.userList))
+			{
+				await this.store.dispatch('usersModel/setFromLocalDatabase', result.userList);
+			}
+
+			if (Type.isArrayFilled(result.fileList))
+			{
+				await this.store.dispatch('filesModel/setFromLocalDatabase', result.fileList);
+			}
+
+			if (Type.isArrayFilled(result.reactionList))
+			{
+				await this.store.dispatch('messagesModel/reactionsModel/setFromLocalDatabase', {
+					reactions: result.reactionList,
+				});
+			}
+
+			if (Type.isArrayFilled(result.additionalMessageList))
+			{
+				await this.store.dispatch('messagesModel/store', result.additionalMessageList);
+			}
+
+			if (Type.isArrayFilled(result.messageList))
+			{
+				await this.store.dispatch('messagesModel/setFromLocalDatabase', {
+					messages: result.messageList,
+					clearCollection: true,
+				});
+			}
+
+			await this.loadPinMessagesFromDb();
+			await this.loadApplicationSettingsFromDb();
+		}
+
+		async loadPinMessagesFromDb()
+		{
+			const result = await serviceLocator.get('core').getRepository().pinMessage.getByChatId(this.getChatId());
+			logger.info('Dialog.loadPinMessagesFromDb result', result);
+
+			if (Type.isArrayFilled(result.users))
+			{
+				await this.store.dispatch('usersModel/setFromLocalDatabase', result.users);
+			}
+
+			if (Type.isArrayFilled(result.files))
+			{
+				await this.store.dispatch('filesModel/setFromLocalDatabase', result.files);
+			}
+
+			if (Type.isArrayFilled(result.pins))
+			{
+				await this.store.dispatch('messagesModel/pinModel/setFromLocalDatabase', {
+					pins: result.pins,
+					messages: result.messages,
+				});
+			}
+		}
+
+		async loadApplicationSettingsFromDb()
+		{
+			const result = await serviceLocator.get('core')
+				.getRepository().option.get(Setting.option.APP_SETTING_AUDIO_RATE, 1);
+			logger.info(`${this.constructor.name}.loadApplicationSettingsFromDb result`, result);
+
+			if (!Type.isUndefined(result))
+			{
+				await this.store.dispatch('applicationModel/setAudioRateSetting', Number(result))
+					.catch((error) => logger.error(`${this.constructor.name}.loadApplicationSettingsFromDb.applicationModel/setAudioRateSetting.catch:`, error));
+			}
+		}
+
+		/**
+		 * @private
+		 * @param widget
+		 */
+		createView(widget)
+		{
+			this.view = new DialogView({
+				ui: widget,
+				dialogId: this.getDialogId(),
+				chatId: this.getChatId(),
+				lastReadId: this.getDialog().lastReadId,
+			});
+			if (this.contextMessageId)
+			{
+				this.view.setContextOptions(
+					this.contextMessageId,
+					this.withMessageHighlight,
+					AfterScrollMessagePosition.top,
+				);
+			}
+
+			this.messageRenderer = new MessageRenderer({
+				view: this.view,
+				dialogId: this.getDialogId(),
+				chatId: this.getChatId(),
+			});
+
+			this.headerTitle = new HeaderTitle({
+				store: this.store,
+				view: this.view,
+				dialogId: this.getDialogId(),
+			});
+
+			this.headerTitle.startRender();
+
+			this.setInputPlaceholder();
+			this.manageTextField(true);
+
+			this.locator.add('view', this.view);
+			this.locator.add('message-renderer', this.messageRenderer);
+		}
+
+		/**
+		 * @desc Method manage text field
+		 * @param {boolean} [isFirstCall=false]
+		 * @private
+		 */
+		manageTextField(isFirstCall = false)
+		{
+			const isNeedHide = this.isNeedHideTextFieldByPermission();
+
+			if (!isNeedHide)
+			{
+				this.view.showTextField(false);
+				this.view.hideChatJoinButton();
+
+				return;
+			}
+
+			this.view.hideTextField(false);
+
+			// if (isFirstCall)
+			// {
+			// 	return;
+			// }
+
+			const dialogModel = this.getDialog();
+
+			if (dialogModel.role === UserRole.guest)
+			{
+				if (this.isOpenChat())
+				{
+					this.view.showChatJoinButton({
+						text: Loc.getMessage('IMMOBILE_MESSENGER_DIALOG_JOIN_BUTTON_TEXT'),
+						backgroundColor: transparent(AppTheme.colors.accentMainPrimaryalt, 1),
+						testId: 'DIALOG_OPEN_CHAT_JOIN_BUTTON',
+					});
+
+					return;
+				}
+
+				if (this.isChannel() || this.isComment())
+				{
+					this.view.showChatJoinButton({
+						text: Loc.getMessage('IMMOBILE_MESSENGER_DIALOG_CHANNEL_JOIN_BUTTON_TEXT'),
+						backgroundColor: transparent(AppTheme.colors.accentMainPrimaryalt, 1),
+						testId: 'DIALOG_OPEN_CHANNEL_JOIN_BUTTON',
+					});
+
+					return;
+				}
+			}
+
+			if (this.isMuted())
+			{
+				this.view.showChatJoinButton({
+					text: Loc.getMessage('IMMOBILE_MESSENGER_DIALOG_CHANNEL_JOIN_BUTTON_UNMUTE_TEXT'),
+					backgroundColor: AppTheme.colors.chatOverallTech3.length === 7
+						? transparent(AppTheme.colors.chatOverallTech3, 0.16)
+						: AppTheme.colors.chatOverallTech3,
+					testId: 'DIALOG_UNMUTE_BUTTON',
+				});
+
+				return;
+			}
+
+			this.view.showChatJoinButton({
+				text: Loc.getMessage('IMMOBILE_MESSENGER_DIALOG_CHANNEL_JOIN_BUTTON_MUTE_TEXT'),
+				backgroundColor: AppTheme.colors.chatOverallTech3.length === 7
+					? transparent(AppTheme.colors.chatOverallTech3, 0.16)
+					: AppTheme.colors.chatOverallTech3,
+				testId: 'DIALOG_MUTE_BUTTON',
+			});
+		}
+
+		setInputPlaceholder()
+		{
+			let placeholder = Loc.getMessage('IMMOBILE_MESSENGER_DIALOG_INPUT_PLACEHOLDER_TEXT_V2');
+
+			if (this.isChannel())
+			{
+				placeholder = Loc.getMessage('IMMOBILE_MESSENGER_DIALOG_CHANNEL_INPUT_PLACEHOLDER_TEXT');
+			}
+			else if (this.isComment())
+			{
+				placeholder = Loc.getMessage('IMMOBILE_MESSENGER_DIALOG_COMMENT_INPUT_PLACEHOLDER_TEXT');
+			}
+
+			this.view.setInputPlaceholder(placeholder);
+		}
+
+		/**
+		 * @desc Method check permission user for use text field
+		 * @return {boolean}
+		 * @private
+		 */
+		isNeedHideTextFieldByPermission()
+		{
+			const isCanPost = ChatPermission.isCanPost(this.getDialog());
+			const isGroupDialog = DialogHelper.isDialogId(this.getDialogId());
+
+			return !isCanPost && isGroupDialog;
+		}
+
+		isNeedDeleteMessages()
+		{
+			if (this.getChatId() === 0)
+			{
+				return false;
+			}
+
+			if (this.isComment())
+			{
+				return true;
+			}
+
+			if (this.isChannel() && this.getDialogHelper()?.isCurrentUserGuest)
+			{
+				return true;
+			}
+
+			return false;
+		}
+
+		/* region event handlers */
+		/**
+		 * @private
+		 */
+		async onClose()
+		{
+			const dialogId = this.getDialogId();
+			serviceLocator.delete(dialogId);
+			this.unsubscribeExternalEvents();
+			this.unsubscribeInternalEvents();
+			this.unsubscribeStoreEvents();
+			this.unsubscribeViewEvents();
+			this.audioMessagePlayer.stop();
+			this.headerTitle.stopRender();
+			this.contextManager.destructor();
+			this.pullWatchManager.unsubscribe();
+
+			if (this.isNeedDeleteMessages())
+			{
+				const chatId = this.getChatId();
+				if (this.isChannel())
+				{
+					this.store.dispatch('commentModel/deleteComments');
+				}
+
+				this.store.dispatch('messagesModel/clearChatCollection', { chatId });
+				this.store.dispatch('dialoguesModel/update', {
+					dialogId,
+					fields: {
+						inited: false,
+					},
+				});
+			}
+
+			if (this.isChannel())
+			{
+				this.chatService.readChannelComments(this.getDialogId());
+			}
+
+			this.store.dispatch('applicationModel/closeDialogId', dialogId);
+		}
+
+		onHidden()
+		{
+			this.mentionManager?.onDialogHidden();
+		}
+
+		onShow()
+		{
+			this.mentionManager?.onDialogShow();
+		}
+
+		/**
+		 * @private
+		 */
+		onVisibleMessagesChanged({ indexList = [], messageList = [] })
+		{
+			if (!this.view.scrollToFirstUnreadCompleted)
+			{
+				return;
+			}
+
+			const date = this.store.getters['messagesModel/getById'](this.view.getTopMessageOnScreen().id).date;
+			if (date)
+			{
+				const dateText = DateFormatter.getDateGroupFormat(date);
+
+				this.view.setFloatingText(dateText);
+			}
+		}
+
+		/**
+		 * @private
+		 */
+		onReadMessage(messageIdList)
+		{
+			if (!this.view.scrollToFirstUnreadCompleted)
+			{
+				return;
+			}
+
+			if (
+				this.getDialog().role === UserRole.guest
+				&& (this.isChannel() || this.isOpenChat() || this.isComment())
+			)
+			{
+				return;
+			}
+
+			messageIdList.forEach((messageId) => {
+				this.chatService.readMessage(this.getChatId(), messageId);
+			});
+		}
+
+		/**
+		 * @private
+		 */
+		async onScrollToNewMessages()
+		{
+			if (this.needScrollToBottom)
+			{
+				if (Feature.isGoToMessageContextSupported)
+				{
+					await this.contextManager.goToBottomMessageContext();
+				}
+				else
+				{
+					await this.view.scrollToBottomSmoothly();
+				}
+
+				this.needScrollToBottom = false;
+			}
+			else
+			{
+				if (Feature.isGoToMessageContextSupported)
+				{
+					await this.contextManager.goToLastReadMessageContext();
+				}
+				else
+				{
+					await this.view.scrollToLastReadMessage();
+				}
+
+				this.needScrollToBottom = true;
+			}
+		}
+
+		/**
+		 * @private
+		 */
+		onScrollBegin()
+		{
+			this.needScrollToBottom = false;
+
+			this.view.showFloatingText();
+		}
+
+		/**
+		 * @private
+		 */
+		onScrollEnd()
+		{
+			this.view.hideFloatingText();
+		}
+
+		/**
+		 * @private
+		 */
+		onPlaybackCompleted()
+		{
+			this.audioMessagePlayer.playNext();
+		}
+
+		async onUrlTap(url)
+		{
+			logger.log('Dialog.onUrlTap: ', url);
+			const isProcessed = await this.handleInternalUrl(url);
+			if (isProcessed === true)
+			{
+				logger.log('Dialog: internal url was processed', url);
+
+				return;
+			}
+
+			inAppUrl.open(url);
+		}
+
+		/**
+		 * @param {string} url
+		 * @return {Promise<boolean>}
+		 */
+		async handleInternalUrl(url)
+		{
+			const urlObject = new Url(url);
+			// checking for a link to a message in the current dialog.
+			if (urlObject.isLocal && url.includes('/online/'))
+			{
+				const queryParams = urlObject.queryParams;
+				const isCurrentDialogMessage = (
+					queryParams.IM_DIALOG
+					&& queryParams.IM_DIALOG === this.getDialogId()
+					&& queryParams.IM_MESSAGE
+					&& Type.isNumber(parseInt(queryParams.IM_MESSAGE, 10))
+				);
+
+				if (isCurrentDialogMessage)
+				{
+					const messageId = parseInt(queryParams.IM_MESSAGE, 10);
+					await this.contextManager.goToMessageContext({
+						dialogId: this.getDialogId(),
+						messageId,
+					});
+
+					return true;
+				}
+			}
+
+			return false;
+		}
+
+		/**
+		 * @private
+		 */
+		onAudioRecordingStart()
+		{
+			if (this.view.checkIsScrollToNewMessageButtonVisible())
+			{
+				this.view.hideScrollToNewMessagesButton();
+			}
+			this.startRecordVoiceMessage();
+		}
+
+		/**
+		 * @private
+		 */
+		onAudioRecordingFinish()
+		{}
+
+		/**
+		 * @private
+		 */
+		sendAudio(audioFile)
+		{
+			const file = {
+				url: audioFile.localAudioUrl,
+			};
+
+			MessengerEmitter.emit(EventType.messenger.uploadFiles, {
+				dialogId: this.getDialogId(),
+				fileList: [file],
+			});
+		}
+
+		/**
+		 * @private
+		 * @param {{entityId: string, entityType: string} || string} params
+		 */
+		onMentionTap(params)
+		{
+			if (typeof params === 'string')
+			{
+				if (params === 'sidebar')
+				{
+					MessengerEmitter.emit(
+						EventType.messenger.openSidebar,
+						{ dialogId: this.dialogId },
+						ComponentCode.imCopilotMessenger,
+					);
+
+					return;
+				}
+
+				MessengerEmitter.emit(
+					EventType.messenger.openDialog,
+					{ dialogId: params.toString() },
+					ComponentCode.imMessenger,
+				);
+
+				return;
+			}
+
+			if (['user', 'copilot'].includes(params.entityType) && params.entityId === 'sidebar')
+			{
+				MessengerEmitter.emit(
+					EventType.messenger.openSidebar,
+					{ dialogId: this.dialogId },
+				);
+
+				return;
+			}
+
+			if (params.entityId.includes('copy:id'))
+			{
+				try
+				{
+					let messageId = params.entityId.split('id')[1];
+					messageId = parseInt(messageId, 10);
+					const modelMessage = this.store.getters['messagesModel/getById'](messageId);
+					const descAttach = modelMessage?.params?.ATTACH[0]?.DESCRIPTION;
+					const text = Loc.getMessage('IMMOBILE_MESSENGER_DIALOG_COPY_LINK_TEXT');
+					DialogTextHelper.copyToClipboard(
+						{ clipboardText: descAttach, notificationText: text },
+						this.view.ui,
+					);
+				}
+				catch (error)
+				{
+					logger.error(`${this.constructor.name}.onMentionTap.DialogTextHelper.copyToClipboard.catch:`, error);
+				}
+
+				return;
+			}
+
+			if (params.entityType === 'chat')
+			{
+				const dialogId = DialogHelper.isDialogId(params.entityId) ? params.entityId : `chat${params.entityId}`;
+
+				MessengerEmitter.emit(EventType.messenger.openDialog, { dialogId }, ComponentCode.imMessenger);
+
+				return;
+			}
+			MessengerEmitter.emit(
+				EventType.messenger.openDialog,
+				{ dialogId: params.entityId.toString() },
+				ComponentCode.imMessenger,
+			);
+		}
+
+		/**
+		 * @param {string} imageId
+		 * @param {string} messageId
+		 */
+		onImageTap(imageId, messageId, localUrl = null)
+		{
+			logger.log('Dialog.onImageTap', imageId, messageId, localUrl);
+
+			if (Type.isStringFilled(localUrl))
+			{
+				viewer.openImage(localUrl);
+
+				return;
+			}
+
+			const messages = this.view.getImageMessages();
+
+			const imagesCollection = [];
+			messages.forEach((message) => {
+				const fileModel = this.store.getters['filesModel/getById'](message.image.id);
+				if (!Type.isUndefined(fileModel))
+				{
+					imagesCollection.push({
+						url: fileModel.urlShow,
+						previewUrl: fileModel.urlPreview,
+						default: message.id === messageId,
+						description: fileModel.name,
+					});
+				}
+			});
+
+			viewer.openImageCollection(imagesCollection);
+		}
+
+		/**
+		 *
+		 * @param audioId
+		 * @param messageId
+		 * @param isPlaying
+		 * @param playingTime
+		 */
+		onAudioTap(audioId, messageId, isPlaying, playingTime)
+		{
+			logger.log('Dialog.onAudioTap', audioId, messageId, isPlaying, playingTime);
+
+			const fileModel = this.store.getters['filesModel/getById'](audioId);
+			if (!fileModel || fileModel.type !== FileType.audio)
+			{
+				return;
+			}
+
+			const shouldPlayAudio = !isPlaying;
+			if (shouldPlayAudio)
+			{
+				this.audioMessagePlayer.play(Number(messageId), playingTime);
+			}
+			else
+			{
+				this.audioMessagePlayer.stop(playingTime);
+			}
+		}
+
+		/**
+		 * @param {string} audioId
+		 * @param {number} messageId
+		 * @param {number} playingTime
+		 */
+		async onAudioRateTap(audioId, messageId, playingTime)
+		{
+			logger.log(`${this.constructor.name}.onAudioRateTap`, audioId, messageId);
+			const playingMessageModel = this.store.getters['messagesModel/getById'](messageId);
+			if (!playingMessageModel || !playingMessageModel.files[0])
+			{
+				return;
+			}
+			playingMessageModel.playingTime = playingTime;
+
+			try
+			{
+				await this.audioMessagePlayer.changeRate();
+				await this.messageRenderer.render([playingMessageModel]);
+			}
+			catch (error)
+			{
+				logger.error(`${this.constructor.name}.onAudioRateTap.changeRate.catch:`, error);
+			}
+		}
+
+		/**
+		 *
+		 * @param videoId
+		 * @param messageId
+		 */
+		onVideoTap(videoId, messageId, localUrl = null)
+		{
+			logger.log('Dialog.onVideoTap', videoId, messageId, localUrl);
+			if (Type.isStringFilled(localUrl))
+			{
+				viewer.openVideo(localUrl);
+
+				return;
+			}
+
+			const fileModel = this.store.getters['filesModel/getById'](Number(videoId));
+
+			if (!fileModel || fileModel.type !== FileType.video)
+			{
+				return;
+			}
+
+			viewer.openVideo(fileModel.urlDownload);
+		}
+
+		/**
+		 *
+		 * @param fileId
+		 * @param messageId
+		 */
+		onFileTap(fileId, messageId)
+		{
+			logger.log('Dialog.onFileTap', fileId, messageId);
+			const fileModel = this.store.getters['filesModel/getById'](fileId);
+			if (!fileModel || fileModel.type !== FileType.file)
+			{
+				return;
+			}
+
+			viewer.openDocument(fileModel.urlDownload, fileModel.name);
+		}
+
+		/**
+		 *
+		 * @param {number} messageIndex
+		 * @param message
+		 */
+		async onForwardTap(messageIndex, message)
+		{
+			logger.log('Dialog.onForwardTap', messageIndex, message);
+
+			const modelMessage = this.store.getters['messagesModel/getById'](message.id);
+			// eslint-disable-next-line es/no-optional-chaining
+			const forwardIdData = modelMessage?.forward?.id.split('/');
+			let dialogId = forwardIdData[0];
+			if (dialogId.includes(':')) // forwarded personal message
+			{
+				const users = dialogId.split(':');
+				const user1 = users[0];
+				const user2 = users[1];
+				const currentUserId = serviceLocator.get('core').getUserId();
+
+				if (currentUserId === Number(user1))
+				{
+					dialogId = user2;
+				}
+				else if (currentUserId === Number(user2))
+				{
+					dialogId = user1;
+				}
+			}
+
+			const messageId = forwardIdData[1];
+			logger.log('Dialog.onForwardTap: forwardIdData: ', dialogId, messageId);
+
+			await this.contextManager.goToMessageContext({
+				dialogId,
+				messageId,
+				parentMessageId: message.id,
+			});
+		}
+
+		/**
+		 * @param {string} phoneText
+		 */
+		onPhoneTap(phoneText)
+		{
+			logger.log('Dialog.onPhoneTap', phoneText);
+			const isCanUseTelephony = MessengerParams.isCanUseTelephony();
+			const { openPhoneMenu } = require('communication/phone-menu');
+			openPhoneMenu({ number: phoneText, canUseTelephony: isCanUseTelephony });
+		}
+
+		onRichPreviewTap(link, messageId)
+		{
+			logger.log('Dialog.onRichPreviewTap: ', link);
+
+			inAppUrl.open(link);
+		}
+
+		onRichNameTap(link, messageId)
+		{
+			logger.log('Dialog.onRichNameTap: ', link);
+
+			inAppUrl.open(link);
+		}
+
+		onRichCancelTap(messageId)
+		{
+			logger.log('Dialog.onRichCancelTap: ', messageId);
+
+			const message = this.store.getters['messagesModel/getById'](messageId);
+			if (message.richLinkId)
+			{
+				this.messageService.deleteRichLink(messageId, message.richLinkId);
+			}
+		}
+
+		async onChannelCommentTap(messageId)
+		{
+			logger.log(`Dialog.onChannelCommentTap: ${messageId}`);
+
+			const commentInfo = this.store.getters['commentModel/getByMessageId'](messageId);
+
+			if (commentInfo && commentInfo.chatId > 0)
+			{
+				logger.log('Dialog.onChannelCommentTap: comment info', commentInfo);
+				MessengerEmitter.emit(EventType.messenger.openDialog, {
+					dialogId: commentInfo.dialogId,
+					chatType: DialogType.comment,
+				});
+
+				return;
+			}
+			logger.log('Dialog.onChannelCommentTap: comment info is not found, load comment chat by post id');
+
+			const commentDialogId = await this.chatService.loadCommentChatWithMessagesByPostId(Number(messageId));
+			logger.log(`Dialog.onChannelCommentTap: loaded comment dialogId ${commentDialogId}`);
+
+			MessengerEmitter.emit(EventType.messenger.openDialog, {
+				dialogId: commentDialogId,
+				chatType: DialogType.comment,
+			});
+		}
+
+		/**
+		 * @private
+		 */
+		onStatusFieldTap()
+		{
+			const dialog = this.getDialog();
+			const messageId = dialog.lastMessageId;
+			const isGroupDialog = DialogHelper.isDialogId(this.getDialogId());
+			if (
+				!isGroupDialog
+				|| !dialog.lastMessageId
+				|| !dialog.lastMessageViews
+				|| !dialog.lastMessageViews.firstViewer
+			)
+			{
+				return;
+			}
+
+			this.messageService.openUsersReadMessageList(messageId);
+		}
+
+		/**
+		 * @private
+		 */
+		onChatJoinButtonTapHandler()
+		{
+			const dialog = this.getDialog();
+
+			if (dialog.role === UserRole.guest)
+			{
+				this.joinUserChat();
+
+				return;
+			}
+
+			if (this.isMuted())
+			{
+				this.chatService.unmuteChat(this.getDialogId());
+			}
+			else
+			{
+				this.chatService.muteChat(this.getDialogId());
+			}
+		}
+
+		/**
+		 * @private
+		 */
+		onMessageAvatarTap(index, message)
+		{
+			const messageId = Number(message.id);
+			const modelMessage = this.store.getters['messagesModel/getById'](messageId);
+			if (!modelMessage)
+			{
+				return;
+			}
+
+			const authorId = modelMessage.authorId;
+			const user = this.store.getters['usersModel/getById'](authorId);
+			if (!user)
+			{
+				return;
+			}
+
+			if (!user.bot)
+			{
+				UserProfile.show(authorId, { backdrop: true });
+			}
+		}
+
+		onMessageAvatarLongTap(index, message)
+		{
+			const messageId = Number(message.id);
+			const modelMessage = this.store.getters['messagesModel/getById'](messageId);
+			if (!modelMessage)
+			{
+				return;
+			}
+
+			if (modelMessage.id === this.getDialog().parentMessageId)
+			{
+				return;
+			}
+
+			const authorId = modelMessage.authorId;
+			if (authorId === 0)
+			{
+				return;
+			}
+
+			const user = this.store.getters['usersModel/getById'](authorId);
+			if (!user)
+			{
+				return;
+			}
+
+			if (!ChatPermission.isCanOpenAvatarMenu(this.getDialog()))
+			{
+				return;
+			}
+
+			MessageAvatarMenu.createByAuthorId(authorId, {
+				isBot: user.bot,
+				isCanMention: ChatPermission.isCanMention(this.getDialog()),
+				dialogId: this.getDialogId(),
+			}).open();
+			Haptics.impactMedium();
+		}
+
+		/**
+		 * @private
+		 */
+		onMessageDoubleTap(index, message)
+		{
+			if (!message.showReaction)
+			{
+				return;
+			}
+
+			this.setReaction(ReactionType.like, message);
+		}
+
+		/**
+		 * @desc Handler change text in input message zone ( native region )
+		 * @param {string} text
+		 */
+		onChangeText(text)
+		{
+			if (text && !ObjectUtils.isStringFullSpace(text))
+			{
+				this.startWriting();
+			}
+
+			this.draftManager.changeTextHandler(text);
+		}
+
+		/**
+		 * @private
+		 */
+		onAttachTap()
+		{
+			this.view.showAttachPicker((fileList) => {
+				MessengerEmitter.emit(EventType.messenger.uploadFiles, {
+					dialogId: this.getDialogId(),
+					fileList,
+				});
+			});
+		}
+
+		async sendMessage(text, promptCode = null)
+		{
+			this.view.clearInput();
+			this.draftManager.saveDraft('');
+			this.cancelWritingRequest();
+
+			if (this.mentionManager?.isMentionProcessed)
+			{
+				this.mentionManager?.finishMentioning();
+			}
+
+			if (this.replyManager.isEditInProcess)
+			{
+				const messageId = this.replyManager.getEditMessage().id;
+				this.messageService.updateText(messageId, text, this.getDialogId());
+				this.replyManager.finishEditingMessage();
+
+				return;
+			}
+
+			if (ObjectUtils.isStringFullSpace(text) && !this.replyManager.isForwardInProcess)
+			{
+				return;
+			}
+
+			const sendMessageParams = this.prepareMessageToSend(text, promptCode);
+			await this.contextManager.goToBottomMessageContext();
+
+			this.sendMessageToModel(sendMessageParams)
+				.then(async () => {
+					this.onCancelReply();
+					this.draftManager.saveDraft('');
+
+					await this.view.scrollToBottomSmoothly();
+					await this.sendMessageToServer(sendMessageParams);
+				})
+				.catch((error) => logger.error('Dialog.sendMessage.error', error))
+			;
+		}
+
+		prepareMessageToSend(text, promptCode = null)
+		{
+			let forwardingMessage = null;
+			const messageUuid = Uuid.getV4();
+
+			const message = {
+				chatId: this.getChatId(),
+				authorId: MessengerParams.getUserId(),
+				text: text.trim(),
+				unread: false,
+				templateId: messageUuid,
+				date: new Date(),
+				sending: true,
+			};
+
+			const requestParams = {
+				dialogId: this.getDialogId(),
+				text,
+				templateId: messageUuid,
+			};
+
+			if (promptCode)
+			{
+				requestParams.copilot = { promptCode };
+			}
+
+			if (this.replyManager.isQuoteInProcess)
+			{
+				const quoteMessage = this.replyManager.getQuoteMessage();
+				const quoteMessageId = Number(quoteMessage.id);
+				message.params = { replyId: quoteMessageId };
+				requestParams.replyId = quoteMessageId;
+			}
+
+			if (this.replyManager.isForwardInProcess)
+			{
+				const forwardMessage = this.replyManager.getForwardMessage(); // need to forward message to the same chat
+				const forwardModel = this.store.getters['messagesModel/getById'](Number(forwardMessage.id));
+
+				const forwardUuid = Uuid.getV4();
+
+				forwardingMessage = {
+					chatId: this.getChatId(),
+					authorId: MessengerParams.getUserId(),
+					text: forwardModel.text,
+					unread: false,
+					templateId: forwardUuid,
+					date: new Date(),
+					sending: true,
+					forward: {
+						id: this.buildForwardContextId(forwardModel.id),
+						userId: forwardModel?.forward?.userId ?? forwardModel.authorId,
+					},
+					files: forwardModel.files,
+					params: {
+						ATTACH: forwardModel?.params?.ATTACH,
+						replyId: forwardModel?.params?.replyId,
+					},
+				};
+
+				requestParams.forwardIds = {
+					[forwardUuid]: forwardModel.id,
+				};
+
+				if (this.replyManager.isQuoteInBackground) // TODO future scenario
+				{
+					const quoteMessage = this.replyManager.getQuoteMessage();
+					const quoteMessageId = Number(quoteMessage.id);
+					message.params = { replyId: quoteMessageId };
+					requestParams.replyId = quoteMessageId;
+				}
+			}
+
+			return {
+				message,
+				forwardingMessage,
+				requestParams,
+			};
+		}
+
+		async sendMessageToModel(sendMessageParams)
+		{
+			if (Type.isStringFilled(sendMessageParams.message.text)) // check when forward without comment message
+			{
+				await this.store.dispatch('messagesModel/add', sendMessageParams.message);
+			}
+
+			if (!Type.isNull(sendMessageParams.forwardingMessage))
+			{
+				await this.store.dispatch('messagesModel/add', sendMessageParams.forwardingMessage);
+			}
+		}
+
+		/**
+		 * @private
+		 * @param {{message: Object, forwardingMessage: Object | null, requestParams: Object}} sendMessageParams
+		 * @return {Promise}
+		 */
+		async sendMessageToServer(sendMessageParams)
+		{
+			logger.log('Dialog.sendMessageToServer', sendMessageParams);
+			let id = 0;
+
+			try
+			{
+				const response = await MessageRest.send(sendMessageParams.requestParams);
+				logger.log('Dialog.sendMessageToServer response', response);
+
+				if (response.id) // check when forward without comment message
+				{
+					id = response.id;
+					await this.store.dispatch('messagesModel/updateWithId', {
+						id: sendMessageParams.message.templateId,
+						fields: {
+							id: response.id,
+							templateId: sendMessageParams.message.templateId,
+							error: false,
+						},
+					});
+				}
+
+				if (Type.isPlainObject(response.uuidMap))
+				{
+					for await (const [uuid, messageId] of Object.entries(response.uuidMap))
+					{
+						id = messageId;
+						await this.store.dispatch('messagesModel/updateWithId', {
+							id: uuid,
+							fields: {
+								id: messageId,
+								templateId: uuid,
+								error: false,
+							},
+						});
+					}
+				}
+			}
+			catch (response)
+			{
+				logger.warn('Dialog.sendMessageToServer catch', response);
+				id = sendMessageParams.message.templateId;
+
+				this.store.dispatch('messagesModel/update', {
+					id: sendMessageParams.message.templateId,
+					fields: {
+						error: true,
+						errorReason: response.status,
+					},
+				});
+
+				if (!Type.isNull(sendMessageParams.forwardingMessage))
+				{
+					id = sendMessageParams.forwardingMessage.templateId;
+					this.store.dispatch('messagesModel/update', {
+						id: sendMessageParams.forwardingMessage.templateId,
+						fields: {
+							error: true,
+							errorReason: response.status,
+						},
+					});
+				}
+			}
+			finally
+			{
+				this.setRecentNewMessage(id);
+			}
+		}
+
+		buildForwardContextId(messageId)
+		{
+			const dialogId = this.getDialog().dialogId;
+			if (dialogId.startsWith('chat'))
+			{
+				return `${dialogId}/${messageId}`;
+			}
+
+			const currentUser = serviceLocator.get('core').getUserId();
+
+			return `${dialogId}:${currentUser}/${messageId}`;
+		}
+
+		/**
+		 * @desc Resend all break messages from current chat ( if three days wait is expired )
+		 * @private
+		 */
+		resendMessages()
+		{
+			const breakMessages = this.store.getters['messagesModel/getBreakMessages'](this.getChatId());
+			logger.info('Dialog.resendMessages', breakMessages);
+			const RESEND_TIME_HOLD = 200;
+			const sortedMessages = this.sortMessagesByType(breakMessages);
+
+			const isManualSend = (message) => this.isWaitSendExpired(message.date)
+				|| message.errorReason === 0
+				|| message.errorReason === ErrorCode.uploadManager.INTERNAL_SERVER_ERROR;
+
+			sortedMessages.forEach((messages, key) => {
+				if (Type.isArray(messages))
+				{
+					if (!isManualSend(messages[0]))
+					{
+						setTimeout(() => {
+							this.resendGroupMessages(messages);
+						}, key * RESEND_TIME_HOLD);
+					}
+				}
+				else
+				if (!isManualSend(messages))
+				{
+					setTimeout(() => {
+						const bottomMessage = this.view.getBottomMessage();
+						const isBottomMessage = bottomMessage.id === messages.id;
+						this.resendMessage(Number(!isBottomMessage), messages);
+					}, key * RESEND_TIME_HOLD);
+				}
+			});
+		}
+
+		sendAnalyticsOpenDialog()
+		{
+			if (!this.isNew)
+			{
+				const dialogData = this.getDialog();
+				const category = this.isChannel(dialogData)
+					? Analytics.Category.channel
+					: (Analytics.Category[dialogData.type] || Analytics.Category.chat);
+
+				const type = Analytics.Type[dialogData?.type] ?? Analytics.Type.custom;
+				const p3 = (dialogData.role === UserRole.guest || dialogData.role === UserRole.none)
+					? Analytics.P3.isMemberN : Analytics.P3.isMemberY;
+
+				let section = Analytics.Section.chatTab;
+				switch (MessengerParams.getComponentCode())
+				{
+					case ComponentCode.imChannelMessenger: section = Analytics.Section.channelTab;
+						break;
+					case ComponentCode.imCopilotMessenger: section = Analytics.Section.copilotTab;
+						break;
+					default: section = Analytics.Section.chatTab;
+				}
+
+				const element = this.isFromPush ? Analytics.Element.push : null;
+
+				const analytics = new AnalyticsEvent()
+					.setTool(Analytics.Tool.im)
+					.setCategory(category)
+					.setEvent(Analytics.Event.openExisting)
+					.setType(type)
+					.setSection(section)
+					.setElement(element)
+					.setP3(p3)
+					.setP5(`chatId_${dialogData?.chatId}`);
+
+				if (this.isComment(dialogData))
+				{
+					const parentDialogData = this.getDialogByChatId(dialogData?.parentChatId);
+					const p1 = parentDialogData?.type === DialogType.channel
+						? Analytics.P1.closedChannel : Analytics.P1[parentDialogData?.type];
+
+					analytics.setType(Analytics.Type.comment);
+					analytics.setCategory(Analytics.Category.channel);
+					analytics.setP1(p1);
+					analytics.setP4(`parentChatId_${dialogData?.parentChatId}`);
+				}
+
+				try
+				{
+					analytics.send();
+				}
+				catch (err)
+				{
+					Logger.error(`${this.constructor.name}.sendAnalyticsOpenDialog.send.catch:`, err);
+				}
+			}
+		}
+
+		/**
+		 * @desc Sorted messages by type ( media or text )
+		 * @param {Array<MessagesModelState>} messages
+		 * @return {Array}
+		 * @private
+		 */
+		sortMessagesByType(messages)
+		{
+			const sortByTypeGroups = [];
+			messages.forEach((message, index) => {
+				if (message.files.length > 0)
+				{
+					const previousMess = messages[index - 1];
+					if (previousMess && previousMess.files.length > 0)
+					{
+						const previous = sortByTypeGroups[sortByTypeGroups.length - 1];
+						if (Type.isArray(previous))
+						{
+							previous.push(message);
+						}
+						else
+						{
+							sortByTypeGroups.push([message]);
+						}
+					}
+					else
+					{
+						sortByTypeGroups.push([message]);
+					}
+				}
+				else
+				{
+					sortByTypeGroups.push(message);
+				}
+			});
+
+			return sortByTypeGroups;
+		}
+
+		/**
+		 * @desc Resend break message
+		 * @param {number} index
+		 * @param {object} message
+		 * @private
+		 */
+		async resendMessage(index, message)
+		{
+			const modelMessage = this.store.getters['messagesModel/getById'](message.id);
+			const messageToSend = {
+				dialogId: this.getDialogId(),
+				text: modelMessage.text,
+				messageType: 'self',
+				templateId: message.id,
+			};
+
+			if (index > 0)
+			{
+				await this.messageRenderer.delete([message.id]);
+				await this.messageRenderer.render([modelMessage]);
+				await this.view.scrollToBottomSmoothly();
+			}
+
+			if (modelMessage.files.length > 0)
+			{
+				const fileId = modelMessage.files[0];
+				const file = this.store.getters['filesModel/getById'](fileId);
+
+				if (Type.isUndefined(file))
+				{
+					return;
+				}
+
+				const fileObj = {
+					id: file.id,
+					previewUrl: file.urlPreview,
+					url: file.localUrl,
+					type: file.type || FileType.file,
+					name: file.name,
+					...file.image,
+				};
+				this.store.dispatch('messagesModel/delete', { id: message.id })
+					.catch((err) => logger.error('Dialog.resendMessage.deleteMessage', err));
+
+				MessengerEmitter.emit(EventType.messenger.uploadFiles, {
+					dialogId: this.getDialogId(),
+					fileList: [fileObj],
+				});
+			}
+
+			await this.store.dispatch('messagesModel/update', {
+				id: message.id,
+				fields: {
+					error: false,
+					errorReason: OwnMessageStatus.sending,
+				},
+			});
+
+			this.sendMessageToServer({
+				requestParams: messageToSend,
+				message: modelMessage,
+			});
+		}
+
+		/**
+		 * @desc Resend broken messages group ( with file media )
+		 * @param {array} messages
+		 * @private
+		 */
+		resendGroupMessages(messages)
+		{
+			const sendFiles = [];
+			messages.forEach((message) => {
+				const modelMessage = this.store.getters['messagesModel/getById'](message.id);
+
+				const fileId = modelMessage.files[0];
+				const file = this.store.getters['filesModel/getById'](fileId);
+
+				if (Type.isUndefined(file))
+				{
+					return;
+				}
+
+				const fileObj = {
+					id: file.id,
+					previewUrl: file.urlPreview,
+					url: file.localUrl,
+					type: file.type || FileType.file,
+					name: file.name,
+					...file.image,
+				};
+				sendFiles.push(fileObj);
+				this.store.dispatch('messagesModel/delete', { id: message.id })
+					.catch((err) => logger.error('Dialog.resendMessage.deleteMessage', err));
+			});
+
+			MessengerEmitter.emit(EventType.messenger.uploadFiles, {
+				dialogId: this.getDialogId(),
+				fileList: sendFiles,
+			});
+
+			this.view.scrollToBottomSmoothly()
+				.catch((err) => logger.error(`${this.constructor.name}.resendGroupMessages.scrollToBottomSmoothly.catch`, err));
+		}
+
+		setReaction(reaction, message, like)
+		{
+			const messageId = Number(message.id);
+
+			this.messageService.setReaction(reaction, messageId);
+		}
+
+		/**
+		 * @deprecated
+		 * @param index
+		 * @param message
+		 * @param like
+		 */
+		onLike(index, message, like)
+		{
+			const messageId = Number(message.id);
+			const reactions = this.store.getters['messagesModel/reactionsModel/getByMessageId'](messageId);
+
+			if (reactions && reactions.ownReactions.has(ReactionType.like))
+			{
+				this.messageService.removeReaction(ReactionType.like, Number(messageId));
+			}
+			else
+			{
+				this.messageService.addReaction(ReactionType.like, Number(messageId));
+			}
+		}
+
+		/**
+		 * @private
+		 */
+		onMessageFileDownloadTap(index, message)
+		{
+			logger.log('Dialog.onMessageFileDownloadTap: ', index, message);
+
+			const fileList = this.store.getters['messagesModel/getMessageFiles'](message.id);
+			if (!Type.isArrayFilled(fileList))
+			{
+				return;
+			}
+
+			FileDownloadMenu
+				.createByFileId(fileList[0].id)
+				.open()
+			;
+		}
+
+		/**
+		 * @private
+		 */
+		onMessageFileUploadCancelTap(index, message)
+		{
+			logger.log('Dialog.onMessageFileUploadCancelTap: ', index, message);
+
+			const modelMessage = this.store.getters['messagesModel/getById'](message.id);
+			if (!modelMessage || !modelMessage.id || !modelMessage.files || !modelMessage.files[0])
+			{
+				return;
+			}
+
+			MessengerEmitter.emit(EventType.messenger.cancelFileUpload, {
+				messageId: modelMessage.id,
+				fileId: modelMessage.files[0],
+			});
+		}
+
+		/**
+		 * @private
+		 */
+		onReply(index, message)
+		{
+			if (
+				this.replyManager.isQuoteInProcess
+				&& message.id === this.replyManager.getQuoteMessage().id
+			)
+			{
+				return;
+			}
+
+			if (!ChatPermission.isCanReply(this.getDialog()))
+			{
+				return;
+			}
+
+			if (this.isChannel())
+			{
+				return;
+			}
+
+			if (this.isComment() && this.getDialog().parentMessageId === Number(message.id))
+			{
+				return;
+			}
+
+			this.replyManager.startQuotingMessage(message);
+		}
+
+		/**
+		 * @private
+		 */
+		onReadyToReply(index, message)
+		{
+			if (!ChatPermission.isCanReply(this.getDialog()))
+			{
+				Haptics.notifyFailure();
+
+				return;
+			}
+
+			if (this.isChannel())
+			{
+				Haptics.notifyFailure();
+
+				return;
+			}
+
+			if (this.isComment() && this.getDialog().parentMessageId === Number(message.id))
+			{
+				Haptics.notifyFailure();
+
+				return;
+			}
+
+			Haptics.impactMedium();
+		}
+
+		/**
+		 * @private
+		 */
+		async onQuoteTap(message)
+		{
+			const messageId = message.id;
+			const modelMessage = this.store.getters['messagesModel/getById'](messageId);
+			if (!modelMessage)
+			{
+				return;
+			}
+
+			await this.contextManager.goToMessageContext({
+				dialogId: this.getDialogId(),
+				messageId,
+			});
+		}
+
+		/**
+		 * @private
+		 */
+		async onMessageQuoteTap(dialogId, messageId)
+		{
+			await this.contextManager.goToMessageContext({
+				dialogId,
+				messageId,
+			});
+		}
+
+		/**
+		 * @private
+		 */
+		onCancelReply()
+		{
+			if (this.replyManager.isEditInProcess)
+			{
+				this.replyManager.finishEditingMessage();
+
+				return;
+			}
+
+			if (this.replyManager.isQuoteInProcess)
+			{
+				this.replyManager.finishQuotingMessage();
+			}
+
+			if (this.replyManager.isForwardInProcess)
+			{
+				this.replyManager.finishForwardingMessage();
+			}
+		}
+
+		/* endregion event handlers */
+
+		loadTopPage()
+		{
+			if (!this.messageService)
+			{
+				return;
+			}
+
+			this.messageService.loadHistory();
+		}
+
+		loadBottomPage()
+		{
+			if (!this.messageService)
+			{
+				return;
+			}
+
+			this.messageService.loadUnread();
+		}
+
+		/**
+		 * @param {object} mutation
+		 * @param {object} mutation.payload
+		 * @param {Array<MessagesModelState>} mutation.payload.data.messageList
+		 */
+		async drawMessageList(mutation)
+		{
+			const messageList = clone(mutation.payload.data.messageList);
+			const breakMessages = this.store.getters['messagesModel/getBreakMessages'](this.getChatId());
+
+			let currentDialogMessageList = [];
+			messageList.forEach((message) => {
+				if (message.chatId !== this.getChatId())
+				{
+					return;
+				}
+
+				const validateQuoteMessage = this.validateQuote(message);
+				currentDialogMessageList.push({
+					...validateQuoteMessage,
+					reactions: this.store.getters['messagesModel/reactionsModel/getByMessageId'](message.id),
+				});
+			});
+
+			if (!Type.isArrayFilled(currentDialogMessageList))
+			{
+				return;
+			}
+
+			const uniqBreakMessage = breakMessages.filter((message) => {
+				return !currentDialogMessageList.some((messageObj) => messageObj.id === message.id);
+			});
+
+			if (mutation.type === 'messagesModel/setChatCollection')
+			{
+				let endedMessageId = mutation.payload.data.messageList[mutation.payload.data.messageList.length - 1].id;
+				if (mutation.payload.actionName === 'setChatCollection' && this.view.getBottomMessage())
+				{
+					endedMessageId = this.view.getBottomMessage().id;
+				}
+
+				this.removeStatusFieldByEndedMessage(endedMessageId);
+
+				if (mutation.payload.actionName === 'add')
+				{
+					const messages = mutation.payload.data.messageList;
+					const message = messages[messages.length - 1];
+					if (message.authorId === MessengerParams.getUserId())
+					{
+						this.setRecentNewMessage(message.id)
+							.catch((err) => logger.log('Dialog.drawMessageList.setRecentNewMessage.err', err));
+					}
+				}
+			}
+
+			if (uniqBreakMessage.length > 0)
+			{
+				currentDialogMessageList.push(...uniqBreakMessage);
+				currentDialogMessageList = currentDialogMessageList.sort(
+					(a, b) => a.date.getTime() - b.date.getTime(),
+				);
+			}
+
+			const parentMessage = this.getInitialPostMessage();
+			if (parentMessage)
+			{
+				currentDialogMessageList.unshift(parentMessage);
+			}
+
+			await this.messageRenderer.render(currentDialogMessageList);
+			this.drawStatusField();
+		}
+
+		/**
+		 * @return {MessagesModelState|null}
+		 */
+		getInitialPostMessage()
+		{
+			if (!this.isComment())
+			{
+				return null;
+			}
+
+			const dialog = this.getDialog();
+
+			if (dialog.hasPrevPage || Number(dialog.parentMessageId) === 0)
+			{
+				return null;
+			}
+			const message = this.store.getters['messagesModel/getById'](this.getDialog().parentMessageId);
+
+			const validateQuoteMessage = this.validateQuote(message);
+
+			return {
+				...validateQuoteMessage,
+				reactions: this.store.getters['messagesModel/reactionsModel/getByMessageId'](message.id),
+			};
+		}
+
+		isParentMessage(messageId)
+		{
+			return Number(this.getDialog().parentMessageId) === Number(messageId);
+		}
+
+		/**
+		 * @desc Check and validate text message quote
+		 * @param {MessagesModelState} message
+		 * @return {MessagesModelState} validateQuoteMessage
+		 */
+		validateQuote(message)
+		{
+			const validateQuoteMessage = message;
+			if (this.replyManager.isHasQuote(validateQuoteMessage))
+			{
+				const quoteText = this.replyManager.getQuoteText({ id: message.params.replyId });
+				if (Type.isStringFilled(quoteText))
+				{
+					validateQuoteMessage.text = `${quoteText}${message.text}`;
+				}
+			}
+
+			return validateQuoteMessage;
+		}
+
+		/**
+		 * @desc The method routes the dialog handlers by the name of the action from the store
+		 * @param {Object} mutation
+		 * @param {MutationPayload<
+		 * DialoguesUpdateData | DialoguesAddData | UsersSetData,
+		 * DialoguesUpdateActions | DialoguesAddActions | UsersSetActions | CopilotUpdateData
+		 * >} mutation.payload
+		 * @return {Boolean}
+		 * @private
+		 */
+		dialogUpdateHandlerRouter(mutation)
+		{
+			const isDialogType = mutation.type.startsWith('dialoguesModel');
+			if (isDialogType && mutation.payload.data.dialogId)
+			{
+				const currentDialogId = String(this.getDialogId());
+				const mutationDialogId = String(mutation.payload.data.dialogId);
+				if (mutationDialogId !== currentDialogId)
+				{
+					return false;
+				}
+			}
+
+			if (mutation.type === 'usersModel/set')
+			{
+				const currentUser = mutation.payload.data.userList
+					.find((user) => user.id === MessengerParams.getUserId())
+				;
+
+				if (currentUser)
+				{
+					this.view.setCurrentUserAvatar(this.getCurrentUserAvatarForReactions());
+				}
+			}
+
+			if (
+				mutation.payload.data
+				&& (mutation.payload.data.fields?.role || mutation.payload.data.fields?.muteList))
+			{
+				this.manageTextField();
+			}
+
+			switch (mutation.payload.actionName)
+			{
+				case 'setLastMessageViews':
+				case 'incrementLastMessageViews':
+					this.drawStatusField();
+					break;
+				case 'addParticipants':
+				case 'removeParticipants':
+				case 'set':
+					this.checkAvailableMention(mutation);
+					this.redrawHeader(mutation);
+					this.redrawHeaderButtons();
+					break;
+				case 'mute':
+				case 'unmute': {
+					this.redrawHeaderButtons();
+
+					break;
+				}
+				default:
+					this.redrawHeader(mutation);
+					break;
+			}
+
+			return true;
+		}
+
+		/**
+		 * @desc The handler change status application model
+		 * @param {Object} mutation
+		 * @private
+		 */
+		applicationStatusHandler(mutation)
+		{
+			this.redrawHeader(mutation);
+
+			if (mutation.payload.data && mutation.payload.data.status && !mutation.payload.data.status.value)
+			{
+				this.resendMessages();
+			}
+		}
+
+		/**
+		 * @desc Create new status field by current dialog data and draw it in view
+		 * @param {boolean} [isCheckBottom=true]
+		 * @return void
+		 */
+		drawStatusField(isCheckBottom = true)
+		{
+			const dialogModelState = this.getDialog();
+			if (!dialogModelState.lastMessageId
+				|| !dialogModelState.lastMessageViews
+				|| !dialogModelState.lastMessageViews.firstViewer
+				|| !dialogModelState.lastMessageViews.messageId)
+			{
+				return;
+			}
+
+			const message = this.store.getters['messagesModel/getById'](dialogModelState.lastMessageViews.messageId);
+			if (!message)
+			{
+				return;
+			}
+
+			const bottomMessage = this.view.getBottomMessage();
+			if (isCheckBottom && message.id !== Number(bottomMessage.id))
+			{
+				return;
+			}
+
+			const isGroupDialog = DialogHelper.isDialogId(this.getDialogId());
+			const statusField = new StatusField({
+				lastMessageViews: dialogModelState.lastMessageViews,
+				isGroupDialog,
+			});
+
+			if (this.messageService !== null)
+			{
+				this.messageService.createUsersReadCache();
+			}
+			this.view.setStatusField(statusField.statusType, statusField.statusText);
+		}
+
+		/**
+		 * @desc Remove status field in view by check equal ended message id
+		 * @param {number|string} endedMessageId
+		 * @return void
+		 */
+		removeStatusFieldByEndedMessage(endedMessageId)
+		{
+			const newMessageId = String(endedMessageId);
+			const currentMessageId = this.messageRenderer.messageIdsStack[this.messageRenderer.messageIdsStack.length - 1];
+			if (Type.isUndefined(currentMessageId) || String(currentMessageId) !== newMessageId)
+			{
+				this.removeStatusField();
+			}
+		}
+
+		/**
+		 * @desc Remove status field in view
+		 * @return void
+		 */
+		removeStatusField()
+		{
+			this.view.clearStatusField();
+		}
+
+		/**
+		 * @param {object} mutation
+		 * @param {string} mutation.payload.actionName
+		 * @param {ReactionsModelState[]} mutation.payload.data.reactionList
+		 */
+		async redrawReactionMessages(mutation)
+		{
+			if (mutation.payload.actionName !== 'setFromPullEvent')
+			{
+				return;
+			}
+			logger.log(`Dialog.redrawReactionMessages ${this.dialogId}`, mutation);
+
+			/** @type {Array<MessagesModelState>} */
+			const result = [];
+			mutation.payload.data.reactionList.forEach((reaction) => {
+				const messageId = reaction.messageId;
+
+				const message = this.store.getters['messagesModel/getById'](messageId);
+
+				if (!('id' in message))
+				{
+					return;
+				}
+
+				if (message.chatId !== this.getChatId() && message.id !== this.getDialog().parentMessageId)
+				{
+					return;
+				}
+
+				const validateQuoteMessage = this.validateQuote(message);
+				result.push(validateQuoteMessage);
+			});
+
+			if (result.length === 0)
+			{
+				return;
+			}
+			logger.log(`Dialog.redrawReactionMessages ${this.dialogId}`, result);
+
+			await this.messageRenderer.updateMessageList(result);
+		}
+
+		/**
+		 * @param {ReactionsModelState} mutation.payload.data.reaction
+		 */
+		async redrawReactionMessage(mutation)
+		{
+			logger.log(`Dialog.redrawReactionMessage ${this.dialogId}`, mutation);
+			const message = this.store.getters['messagesModel/getById'](mutation.payload.data.reaction.messageId);
+
+			if (!('id' in message))
+			{
+				return;
+			}
+
+			if (message.chatId !== this.getChatId() && message.id !== this.getDialog().parentMessageId)
+			{
+				return;
+			}
+
+			const validateQuoteMessage = this.validateQuote(message);
+
+			logger.log(`Dialog.redrawReactionMessage ${this.dialogId}`, validateQuoteMessage);
+
+			await this.messageRenderer.updateMessageList([validateQuoteMessage]);
+		}
+
+		/**
+		 * @param {MutationPayload<
+		 * CommentsSetCommentsData | CommentsSetCountersData,
+		 * CommentsSetCommentsActions | CommentsSetCountersActions
+		 * >} mutation.payload
+		 */
+		async updateCommentRouter(mutation)
+		{
+			logger.log(`Dialog.updateCommentRouter ${this.dialogId}`, mutation);
+			this.commentButton.redraw();
+			const { data, actionName } = mutation.payload;
+			if (!this.getDialog().inited)
+			{
+				return;
+			}
+
+			if (['setComments', 'setCommentWithCounter', 'updateComment', 'setComment'].includes(actionName))
+			{
+				const messageList = [];
+				data.commentList.forEach((comment) => {
+					if (this.messageRenderer.isMessageRendered(comment.messageId))
+					{
+						const message = this.store.getters['messagesModel/getById'](comment.messageId);
+						messageList.push(this.validateQuote(message));
+					}
+				});
+				logger.log('Dialog.updateCommentRouter: update messages by comment info data', messageList);
+
+				if (messageList.length === 0)
+				{
+					return;
+				}
+
+				await this.messageRenderer.render(messageList, 'commentInfo');
+
+				return;
+			}
+
+			if (actionName === 'setCounters')
+			{
+				const messageList = [];
+				Object.entries(data.chatCounterMap).forEach(([channelChatId, countersMap]) => {
+					if (this.getChatId() !== Number(channelChatId))
+					{
+						return;
+					}
+
+					Object.entries(countersMap).forEach(([commentChatId, counter]) => {
+						const comment = this.store.getters['commentModel/getCommentInfoByCommentChatId'](Number(commentChatId));
+						if (this.messageRenderer.isMessageRendered(comment?.messageId))
+						{
+							const message = this.store.getters['messagesModel/getById'](comment.messageId);
+							messageList.push(this.validateQuote(message));
+						}
+					});
+				});
+				logger.log('Dialog.updateCommentRouter: update messages by new unread comment counters', messageList);
+				if (messageList.length === 0)
+				{
+					return;
+				}
+
+				await this.messageRenderer.render(messageList, 'commentInfo');
+			}
+		}
+
+		/**
+		 *
+		 * @param {MutationPayload<
+		 * CommentsDeleteChannelCountersData,
+		 * CommentsDeleteChannelCountersActions
+		 * >} mutation.payload
+		 */
+		deleteChannelCountersHandler(mutation)
+		{
+			logger.log(`Dialog.deleteChannelCountersHandler ${this.dialogId}`, mutation);
+			this.commentButton.redraw();
+
+			if (mutation.payload.data.channelId !== this.getChatId())
+			{
+				return;
+			}
+			const { commentChatIdList } = mutation.payload.data;
+
+			const updateMessageList = [];
+			for (const commentChatId of commentChatIdList)
+			{
+				const commentInfo = this.store.getters['commentModel/getCommentInfoByCommentChatId'](commentChatId);
+				if (!commentInfo)
+				{
+					continue;
+				}
+
+				const modelMessage = this.store.getters['messagesModel/getById'](commentInfo.messageId);
+				if ('id' in modelMessage)
+				{
+					updateMessageList.push(this.validateQuote(modelMessage));
+				}
+			}
+
+			if (updateMessageList.length === 0)
+			{
+				return;
+			}
+
+			this.messageRenderer.render(updateMessageList, 'commentInfo')
+				.catch((error) => {
+					logger.error('Dialog.deleteChannelCountersHandler error', error);
+				});
+		}
+
+		/**
+		 *
+		 * @param {ReactionType} reactionId
+		 * @param {Message} message
+		 */
+		openReactionViewer(reactionId, message)
+		{
+			ReactionViewerController.open(message.id, reactionId, this.view.ui);
+		}
+
+		/**
+		 * @desc The method routes the handlers by the name of the action from the store
+		 * @param {Object} mutation
+		 * @return {Boolean}
+		 * @private
+		 */
+		messageUpdateHandlerRouter(mutation)
+		{
+			if (mutation.payload.actionName === 'updateLoadTextProgress')
+			{
+				this.updateProgressFileHandler(mutation);
+			}
+			else
+			{
+				this.redrawMessage(mutation);
+			}
+		}
+
+		async redrawMessage(mutation)
+		{
+			let messageId = mutation.payload.data.id;
+			if (Uuid.isV4(messageId))
+			{
+				messageId = mutation.payload.data.fields.id || messageId;
+			}
+
+			const message = this.store.getters['messagesModel/getById'](messageId);
+			if (!message || (message.chatId !== this.getChatId() && !this.isParentMessage(messageId)))
+			{
+				return;
+			}
+			const cloneMessage = clone(message);
+			const validateQuoteMessage = this.validateQuote(cloneMessage);
+			await this.messageRenderer.render([validateQuoteMessage]);
+		}
+
+		/**
+		 * @desc Method is calling view -> native method for update load text progress in message
+		 * @param {Object} mutation
+		 * @return {Boolean}
+		 * @private
+		 */
+		updateProgressFileHandler(mutation)
+		{
+			const messageId = mutation.payload.data.id;
+			const message = this.store.getters['messagesModel/getById'](messageId);
+			if (!message || message.chatId !== this.getChatId())
+			{
+				return false;
+			}
+
+			const file = this.store.getters['filesModel/getById'](message.files[0]); // TODO if there is more than one file in the message?
+			if (!file)
+			{
+				return false;
+			}
+
+			const data = {
+				messageId,
+				currentBytes: file.uploadData.byteSent,
+				totalBytes: file.uploadData.byteTotal,
+				textProgress: message.loadText,
+			};
+
+			return this.view.updateUploadProgressByMessageId(data);
+		}
+
+		async deleteMessage(mutation)
+		{
+			const messageId = mutation.payload.data.id;
+
+			await this.messageRenderer.delete([messageId]);
+		}
+
+		/**
+		 * @private
+		 * @param {Object} mutation
+		 * @param {MessengerStoreMutation} mutation.type
+		 * @param {any} mutation.payload
+		 */
+		redrawHeader(mutation)
+		{
+			if (mutation.type === 'usersModel/set')
+			{
+				const opponent = mutation.payload.data.userList
+					.find((user) => user.id.toString() === this.getDialogId().toString())
+				;
+				if (opponent)
+				{
+					this.headerTitle.renderTitle();
+				}
+			}
+			else if (mutation.type === 'applicationModel/setStatus')
+			{
+				this.headerTitle.renderTitle();
+			}
+			else
+			{
+				const dialogId = mutation.payload.data.dialogId;
+				if (dialogId === this.getDialogId() || String(dialogId) === this.getDialogId())
+				{
+					this.headerTitle.renderTitle();
+				}
+			}
+		}
+
+		redrawHeaderButtons()
+		{
+			this.headerButtons.render(this.view);
+		}
+
+		/**
+		 * @private
+		 * @param {Object} mutation
+		 * @void
+		 */
+		checkAvailableMention(mutation)
+		{}
+
+		/**
+		 * @private
+		 * @param {Object} mutation
+		 * @param {MessengerStoreMutation} mutation.type
+		 * @param {DialoguesModelState} mutation.payload.data
+		 */
+		updateMessageCounter(mutation)
+		{
+			if (
+				String(mutation.payload.data.dialogId) !== String(this.getDialogId())
+				|| !Type.isNumber(mutation.payload.data.fields.counter)
+			)
+			{
+				return;
+			}
+
+			const counter = mutation.payload.data.fields.counter;
+
+			this.view.setNewMessageCounter(counter);
+		}
+
+		deleteCurrentDialog()
+		{
+			this.store.dispatch('recentModel/delete', { id: this.getDialogId() })
+				.then(() => Counters.update())
+				.catch((err) => logger.log('Dialog.deleteCurrentDialog.recentModel/delete.catch:', err))
+			;
+			this.store.dispatch('dialoguesModel/delete', { id: this.getDialogId() });
+			this.store.dispatch('usersModel/delete', { id: this.getDialogId() });
+		}
+
+		openWebDialog(options)
+		{
+			return new Promise((resolve) => {
+				if (Type.isStringFilled(options.userCode))
+				{
+					WebDialog.getOpenlineDialogByUserCode(options.userCode)
+						.then((dialog) => {
+							options.dialogId = dialog.dialog_id;
+							if (options.dialogId === 0 && Type.isStringFilled(options.fallbackUrl))
+							{
+								Application.openUrl(options.fallbackUrl);
+
+								return;
+							}
+
+							WebDialog.open(options);
+						})
+						.catch((err) => {
+							logger.log('Dialog.openWebDialog.getOpenlineDialogByUserCode.catch:', err);
+						})
+					;
+
+					return;
+				}
+
+				if (Type.isNumber(options.sessionId))
+				{
+					WebDialog.getOpenlineDialogBySessionId(options.sessionId)
+						.then((dialog) => {
+							options.dialogId = dialog.dialog_id;
+							if (options.dialogId === 0 && Type.isStringFilled(options.fallbackUrl))
+							{
+								Application.openUrl(options.fallbackUrl);
+
+								return;
+							}
+
+							WebDialog.open(options);
+						})
+						.catch((err) => {
+							logger.log('Dialog.openWebDialog.getOpenlineDialogBySessionId.catch:', err);
+						})
+					;
+
+					return;
+				}
+
+				WebDialog.open(options);
+				resolve();
+			});
+		}
+
+		static getOpenDialogParams(options = {})
+		{
+			const {
+				dialogId,
+				dialogTitleParams,
+			} = options;
+
+			return WebDialog.getOpenDialogParams(dialogId, dialogTitleParams);
+		}
+
+		static getOpenLineParams(options)
+		{
+			return WebDialog.getOpenLineParams(options);
+		}
+
+		createAudioCall()
+		{
+			Calls.createAudioCall(this.getDialogId());
+		}
+
+		createVideoCall()
+		{
+			Calls.createVideoCall(this.getDialogId());
+		}
+
+		/**
+		 * @desc Call dialog rest request writing message method
+		 * @param {string} dialogId
+		 */
+		startWriting(dialogId = this.getDialogId())
+		{
+			if (this.isAvailableInternet())
+			{
+				this.holdWritingTimerId = setTimeout(() => {
+					DialogRest.writingMessage(dialogId)
+						.then((resolve) => resolve)
+						.catch((err) => logger.log('DialogRest.writingMessage.response', err));
+				}, this.HOLD_WRITING_REST);
+			}
+		}
+
+		isAvailableInternet()
+		{
+			return this.store.getters['applicationModel/getNetworkStatus']();
+		}
+
+		/**
+		 * @desc Call dialog rest request record voice message method
+		 * @param {string} dialogId
+		 */
+		startRecordVoiceMessage(dialogId = this.getDialogId())
+		{
+			if (this.isAvailableInternet())
+			{
+				this.holdWritingTimerId = setTimeout(() => {
+					DialogRest.recordVoiceMessage(dialogId)
+						.then((resolve) => resolve)
+						.catch((err) => logger.log('DialogRest.writingMessage.response', err));
+				}, this.HOLD_WRITING_REST);
+			}
+		}
+
+		/**
+		 * @desc Join to chat current user
+		 * @private
+		 */
+		joinUserChat()
+		{
+			this.chatService.joinChat(this.getDialogId())
+				.catch((data) => logger.error('Dialog.onChatJoinButtonTapHandler.error', data));
+		}
+
+		/**
+		 * @desc Method is canceling timeout with request rest 'im.dialog.writing'
+		 * @void
+		 * @private
+		 */
+		cancelWritingRequest()
+		{
+			if (this.holdWritingTimerId)
+			{
+				clearTimeout(this.holdWritingTimerId);
+				this.holdWritingTimerId = null;
+			}
+		}
+
+		/**
+		 * @desc Set recent item new message
+		 * @param {string|number} messageId
+		 * @return {Promise}
+		 */
+		setRecentNewMessage(messageId)
+		{
+			if (this.isComment())
+			{
+				return Promise.resolve(true);
+			}
+
+			const dialogId = this.getDialogId();
+			const recentModel = this.store.getters['recentModel/getById'](dialogId);
+			const messageModel = this.store.getters['messagesModel/getById'](messageId);
+
+			if (!recentModel && Type.isUndefined(messageModel.id))
+			{
+				return Promise.resolve(true);
+			}
+
+			const isMessageFile = Type.isArray(messageModel.files) && messageModel.files.length > 0;
+			let subTitleIcon = isMessageFile ? SubTitleIconType.wait : SubTitleIconType.reply;
+			if (messageModel.error)
+			{
+				const isManualSend = this.isWaitSendExpired(messageModel.date)
+					|| messageModel.errorReason === 0
+					|| messageModel.errorReason === ErrorCode.uploadManager.INTERNAL_SERVER_ERROR;
+
+				subTitleIcon = isManualSend ? SubTitleIconType.error : SubTitleIconType.wait;
+			}
+
+			let status = MessageStatus.received;
+			if (messageModel && Type.isBoolean(messageModel.viewedByOthers) && messageModel.viewedByOthers)
+			{
+				status = MessageStatus.delivered;
+			}
+
+			const recentItem = RecentConverter.fromPushToModel({
+				id: dialogId,
+				chat: recentModel ? recentModel.chat : this.getDialog(),
+				message: {
+					id: messageId,
+					senderId: messageModel.authorId,
+					text: isMessageFile ? `[${BX.message('IM_F_FILE')}]` : messageModel.text,
+					date: new Date(),
+					subTitleIcon,
+					status,
+				},
+			});
+
+			return this.store.dispatch('recentModel/set', [recentItem]);
+		}
+
+		/**
+		 * @desc Check is expired 3 days after sending
+		 * @param {object} dateMessageSend
+		 * @return {boolean}
+		 */
+		isWaitSendExpired(dateMessageSend)
+		{
+			const dateSend = Type.isDate(dateMessageSend) ? dateMessageSend : new Date();
+			const dateThreeDayAgo = new Date();
+			dateThreeDayAgo.setDate(dateThreeDayAgo.getDate() - 3);
+
+			return dateSend.getTime() < dateThreeDayAgo.getTime();
+		}
+	}
+
+	module.exports = { Dialog };
+});
